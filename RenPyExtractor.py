@@ -2,7 +2,6 @@
 import os
 import shutil
 import threading
-import zipfile
 from pathlib import Path, PurePosixPath
 
 import tkinter as tk
@@ -11,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 from ui_common import *
 
 APP = "RenPy Extractor"
-VERSION = "0.2.1"
+VERSION = "0.2.6"
 SCRIPT_EXTS = {".rpy", ".rpyc", ".rpym", ".rpymc"}
 COMPILED_EXTS = {".rpyc", ".rpymc"}
 
@@ -23,12 +22,25 @@ except Exception:
 
 
 def safe_archive_path(base, name):
-    """Return a safe destination for an archive member or None for unsafe paths."""
     clean = str(name).replace("\\", "/")
     rel = PurePosixPath(clean)
     if rel.is_absolute() or ".." in rel.parts:
         return None
-    return base.joinpath(*rel.parts)
+    parts = list(rel.parts)
+    if parts and parts[0].lower() == "game":
+        parts = parts[1:]
+    if not parts:
+        return None
+    return base.joinpath(*parts)
+
+
+def resolve_game_folder(root):
+    root = Path(root)
+    if root.name.lower() == "game" and root.is_dir():
+        return root
+    if (root / "game").is_dir():
+        return root / "game"
+    raise RuntimeError("Ren'Py game 폴더를 찾지 못했습니다. 게임 최상위 폴더 또는 game 폴더를 선택하세요.")
 
 
 class ExtractorApp(tk.Tk):
@@ -45,7 +57,7 @@ class ExtractorApp(tk.Tk):
         self.remove_rpyc = tk.BooleanVar(value=True)
         self.status = tk.StringVar(value="게임 폴더를 선택해주세요.")
         self.scan_text = tk.StringVar(value="아직 게임을 선택하지 않았습니다.")
-        self.output_zip = None
+        self.output_dir = None
         self.job_options = None
         self.page = 1
 
@@ -58,10 +70,10 @@ class ExtractorApp(tk.Tk):
             widget.destroy()
 
     def render_header(self, active):
-        ttk.Label(self.container, text="RenPy Extractor", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(self.container, text=f"RenPy Extractor  v{VERSION}", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             self.container,
-            text="RPA 추출 및 RPYC 디컴파일",
+            text="RPA 추출 및 RPYC 디컴파일 · 폴더로 바로 출력",
             style="Subtitle.TLabel",
         ).pack(anchor="w", pady=(2, 16))
         stepper(self.container, active, ["게임 폴더 선택", "옵션 설정", "디컴파일", "완료"])
@@ -69,14 +81,7 @@ class ExtractorApp(tk.Tk):
     def render(self):
         self.clear()
         self.render_header(self.page)
-        if self.page == 1:
-            self.page_folder()
-        elif self.page == 2:
-            self.page_options()
-        elif self.page == 3:
-            self.page_work()
-        else:
-            self.page_done()
+        [self.page_folder, self.page_options, self.page_work, self.page_done][self.page - 1]()
 
     def page_folder(self):
         outer, body = card(self.container)
@@ -84,7 +89,7 @@ class ExtractorApp(tk.Tk):
         ttk.Label(body, text="📁  디컴파일할 게임 폴더 선택", style="Section.TLabel").pack(anchor="w")
         ttk.Label(
             body,
-            text="Ren'Py 게임의 최상위 폴더 또는 game 폴더를 선택해주세요.",
+            text="Ren'Py 게임 최상위 폴더 또는 game 폴더를 선택하세요.",
             style="Muted.Card.TLabel",
         ).pack(anchor="w", pady=(3, 12))
 
@@ -103,19 +108,24 @@ class ExtractorApp(tk.Tk):
         if not selected:
             return
         self.source.set(selected)
-        root = Path(selected)
-        rpa = len(list(root.rglob("*.rpa"))) + len(list(root.rglob("*.rpi")))
-        rpyc = len(list(root.rglob("*.rpyc")))
-        rpymc = len(list(root.rglob("*.rpymc")))
-        rpy = len(list(root.rglob("*.rpy")))
-        self.scan_text.set(
-            f"게임 인식 완료  ·  RPA/RPI {rpa}개  ·  RPYC {rpyc}개  ·  "
-            f"RPYMC {rpymc}개  ·  RPY {rpy}개"
-        )
+        try:
+            game = resolve_game_folder(selected)
+            rpa = len(list(game.rglob("*.rpa"))) + len(list(game.rglob("*.rpi")))
+            rpyc = len(list(game.rglob("*.rpyc")))
+            rpymc = len(list(game.rglob("*.rpymc")))
+            rpy = len(list(game.rglob("*.rpy")))
+            rpym = len(list(game.rglob("*.rpym")))
+            self.scan_text.set(
+                f"게임 인식 완료 · RPA/RPI {rpa}개 · RPYC {rpyc}개 · RPYMC {rpymc}개 · RPY/RPYM {rpy + rpym}개"
+            )
+        except Exception as exc:
+            self.scan_text.set(str(exc))
 
     def to_options(self):
-        if not Path(self.source.get()).is_dir():
-            messagebox.showerror(APP, "먼저 올바른 게임 폴더를 선택해주세요.")
+        try:
+            resolve_game_folder(self.source.get())
+        except Exception as exc:
+            messagebox.showerror(APP, str(exc))
             return
         self.page = 2
         self.render()
@@ -125,40 +135,30 @@ class ExtractorApp(tk.Tk):
         outer.pack(fill="x")
         ttk.Label(body, text="파일 처리 옵션", style="Section.TLabel").pack(anchor="w", pady=(0, 12))
 
-        ttk.Checkbutton(
-            body,
-            variable=self.extract_all,
-            text="RPA의 모든 파일 추출 (느림)",
-        ).pack(anchor="w")
+        ttk.Checkbutton(body, variable=self.extract_all, text="RPA의 모든 파일 추출 (느림)").pack(anchor="w")
         ttk.Label(
             body,
-            text="끄면 번역에 필요한 .rpy/.rpyc/.rpym/.rpymc만 추출합니다. Winlator에서는 끄는 것을 권장합니다.",
+            text="끄면 번역에 필요한 .rpy/.rpyc/.rpym/.rpymc만 추출합니다.",
             style="Muted.Card.TLabel",
         ).pack(anchor="w", padx=(24, 0), pady=(2, 12))
 
-        ttk.Checkbutton(
-            body,
-            variable=self.make_original,
-            text="게임 전체 Original 백업 포함 (매우 느림)",
-        ).pack(anchor="w")
+        ttk.Checkbutton(body, variable=self.make_original, text="게임 전체 Original 백업 폴더 포함 (매우 느림)").pack(anchor="w")
         ttk.Label(
             body,
-            text="게임 전체를 ZIP 안에 한 번 더 넣습니다. 큰 게임에서는 수십 분 걸릴 수 있어 기본 OFF입니다.",
+            text="ZIP으로 압축하지 않습니다. 켜면 결과 폴더 안 Original에 원본 게임을 복사합니다.",
             style="Muted.Card.TLabel",
         ).pack(anchor="w", padx=(24, 0), pady=(2, 12))
 
-        ttk.Checkbutton(
+        ttk.Checkbutton(body, variable=self.remove_rpyc, text="성공한 RPYC/RPYMC는 결과에서 제거").pack(anchor="w")
+
+        ttk.Label(
             body,
-            variable=self.remove_rpyc,
-            text="성공한 RPYC/RPYMC는 결과에서 제거",
-        ).pack(anchor="w")
+            text="결과는 항상 게임명_Decompiled/game/... 구조로 만들어 AI Patcher가 바로 인식합니다.",
+            style="Muted.Card.TLabel",
+        ).pack(anchor="w", pady=(14, 0))
 
         if not HAVE_TOOLKIT:
-            ttk.Label(
-                body,
-                text="⚠ rpa-toolkit을 불러오지 못했습니다. EXE 빌드 상태를 확인해주세요.",
-                style="Muted.Card.TLabel",
-            ).pack(anchor="w", pady=(16, 0))
+            ttk.Label(body, text="⚠ rpa-toolkit을 불러오지 못했습니다.", style="Muted.Card.TLabel").pack(anchor="w", pady=(12, 0))
 
         buttons = ttk.Frame(self.container)
         buttons.pack(fill="x", pady=(18, 0))
@@ -174,14 +174,20 @@ class ExtractorApp(tk.Tk):
             messagebox.showerror(APP, "rpa-toolkit을 불러오지 못했습니다.")
             return
 
-        out = filedialog.asksaveasfilename(
-            title="결과 ZIP 저장",
-            defaultextension=".zip",
-            filetypes=[("ZIP 파일", "*.zip")],
-            initialfile=Path(self.source.get()).name + "_decompiled.zip",
-        )
-        if not out:
+        parent = filedialog.askdirectory(title="디컴파일 결과를 저장할 폴더 선택")
+        if not parent:
             return
+
+        src = Path(self.source.get())
+        game = resolve_game_folder(src)
+        base_name = game.parent.name if game.name.lower() == "game" else src.name
+        if not base_name:
+            base_name = "RenPyGame"
+        self.output_dir = Path(parent) / f"{base_name}_Decompiled"
+
+        if self.output_dir.exists():
+            if not messagebox.askyesno(APP, f"기존 결과 폴더가 있습니다. 내용을 새로 만들까요?\n\n{self.output_dir}"):
+                return
 
         self.job_options = {
             "source": self.source.get(),
@@ -189,7 +195,6 @@ class ExtractorApp(tk.Tk):
             "extract_all": self.extract_all.get(),
             "remove_rpyc": self.remove_rpyc.get(),
         }
-        self.output_zip = Path(out)
         self.page = 3
         self.render()
         threading.Thread(target=self.worker, daemon=True).start()
@@ -225,7 +230,6 @@ class ExtractorApp(tk.Tk):
             self.log.insert("end", text + "\n")
             self.log.see("end")
             self.log.configure(state="disabled")
-
         self.after(0, update)
 
     def set_progress(self, current, total, status=None):
@@ -238,38 +242,35 @@ class ExtractorApp(tk.Tk):
             self.percent.config(text=f"{int(current / safe_total * 100)}%")
             if status:
                 self.status.set(status)
-
         self.after(0, update)
 
-    def copy_loose_scripts(self, src, dest_root):
+    def copy_loose_scripts(self, game_src, dest_game):
         copied = 0
-        for path in src.rglob("*"):
+        for path in game_src.rglob("*"):
             if not path.is_file() or path.suffix.lower() not in SCRIPT_EXTS:
                 continue
-            rel = path.relative_to(src)
-            out = dest_root / rel
+            rel = path.relative_to(game_src)
+            out = dest_game / rel
             out.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, out)
             copied += 1
         return copied
 
-    def extract_archives(self, src, dest_root, extract_all):
-        archives = list(src.rglob("*.rpa")) + list(src.rglob("*.rpi"))
+    def extract_archives(self, game_src, dest_game, extract_all):
+        archives = list(game_src.rglob("*.rpa")) + list(game_src.rglob("*.rpi"))
         extracted = 0
         failed = 0
 
         for index, archive in enumerate(archives, 1):
             self.set_progress(index - 1, len(archives), f"RPA 읽는 중 · {index}/{len(archives)} · {archive.name}")
             try:
-                archive_rel_parent = archive.parent.relative_to(src)
+                archive_parent = archive.parent.relative_to(game_src)
                 with RenPyArchive(str(archive)) as rpa:
-                    names = rpa.list()
-                    for name in names:
+                    for name in rpa.list():
                         suffix = Path(str(name)).suffix.lower()
                         if not extract_all and suffix not in SCRIPT_EXTS:
                             continue
-                        base = dest_root / archive_rel_parent
-                        out = safe_archive_path(base, name)
+                        out = safe_archive_path(dest_game / archive_parent, name)
                         if out is None:
                             failed += 1
                             self.add_log(f"[건너뜀] 안전하지 않은 경로: {name}")
@@ -291,8 +292,8 @@ class ExtractorApp(tk.Tk):
 
         return len(archives), extracted, failed
 
-    def decompile_scripts(self, dest_root, remove_rpyc):
-        compiled = list(dest_root.rglob("*.rpyc")) + list(dest_root.rglob("*.rpymc"))
+    def decompile_scripts(self, dest_game, remove_rpyc):
+        compiled = [p for p in dest_game.rglob("*") if p.is_file() and p.suffix.lower() in COMPILED_EXTS]
         ok = 0
         fail = 0
         total = len(compiled)
@@ -301,113 +302,88 @@ class ExtractorApp(tk.Tk):
             output = path.with_suffix(".rpym" if path.suffix.lower() == ".rpymc" else ".rpy")
             try:
                 result = decompile_rpyc_file(path, output_path=output, overwrite=True)
-                if getattr(result, "success", True):
+                if getattr(result, "success", True) and output.is_file():
                     ok += 1
                     if remove_rpyc:
                         path.unlink(missing_ok=True)
-                    self.add_log(f"[디컴파일 완료] {path.relative_to(dest_root)}")
+                    self.add_log(f"[디컴파일 완료] {path.relative_to(dest_game)}")
                 else:
                     fail += 1
-                    self.add_log(
-                        f"[디컴파일 실패] {path.relative_to(dest_root)}: "
-                        f"{getattr(result, 'error', '알 수 없는 오류')}"
-                    )
+                    self.add_log(f"[디컴파일 실패] {path.relative_to(dest_game)}: {getattr(result, 'error', '출력 파일 없음')}")
             except Exception as exc:
                 fail += 1
-                self.add_log(f"[디컴파일 실패] {path.relative_to(dest_root)}: {exc}")
-
+                self.add_log(f"[디컴파일 실패] {path.relative_to(dest_game)}: {exc}")
             self.set_progress(index, total, f"RPYC 디컴파일 · {index}/{total}")
 
         return total, ok, fail
 
-    def add_original_to_zip(self, archive, src):
-        files = [p for p in src.rglob("*") if p.is_file()]
-        total = len(files)
-        for index, path in enumerate(files, 1):
-            self.set_progress(index, total, f"Original 백업 압축 · {index}/{total}")
-            archive.write(path, Path("Original") / path.relative_to(src))
-
     def worker(self):
         options = self.job_options
         src = Path(options["source"])
-        out_zip = self.output_zip
-        workdir = out_zip.parent / (out_zip.stem + "_work")
-        decompiled = workdir / "Decompiled"
+        game_src = resolve_game_folder(src)
+        output = self.output_dir
+        dest_game = output / "game"
 
         try:
-            if workdir.exists():
-                shutil.rmtree(workdir)
-            decompiled.mkdir(parents=True)
+            if output.exists():
+                shutil.rmtree(output)
+            dest_game.mkdir(parents=True, exist_ok=True)
 
             self.set_progress(0, 1, "스크립트 찾는 중...")
-            loose_count = self.copy_loose_scripts(src, decompiled)
+            loose_count = self.copy_loose_scripts(game_src, dest_game)
             self.add_log(f"[완료] 폴더의 스크립트 {loose_count}개 복사")
 
-            archive_count, extracted_count, archive_fail = self.extract_archives(
-                src,
-                decompiled,
-                options["extract_all"],
-            )
+            archive_count, extracted_count, archive_fail = self.extract_archives(game_src, dest_game, options["extract_all"])
+            total, ok, fail = self.decompile_scripts(dest_game, options["remove_rpyc"])
 
-            total, ok, fail = self.decompile_scripts(decompiled, options["remove_rpyc"])
+            if options["make_original"]:
+                self.set_progress(0, 1, "Original 백업 복사 중...")
+                shutil.copytree(src, output / "Original", dirs_exist_ok=True)
 
-            readme = workdir / "README_결과.txt"
-            readme.write_text(
+            text_scripts = len(list(dest_game.rglob("*.rpy"))) + len(list(dest_game.rglob("*.rpym")))
+            (output / "README_결과.txt").write_text(
                 f"{APP} {VERSION}\n"
+                f"결과 폴더: {output}\n"
+                f"AI Patcher에서는 이 폴더 또는 이 안의 game 폴더를 선택하세요.\n"
                 f"RPA/RPI: {archive_count}개\n"
                 f"RPA에서 추출: {extracted_count}개\n"
                 f"RPA 추출 실패/건너뜀: {archive_fail}개\n"
                 f"RPYC/RPYMC: {total}개\n"
                 f"디컴파일 성공: {ok}개\n"
                 f"디컴파일 실패: {fail}개\n"
-                f"RPA 전체 추출: {'예' if options['extract_all'] else '아니오 (스크립트만)'}\n"
-                f"Original 전체 백업: {'예' if options['make_original'] else '아니오'}\n",
+                f"읽을 수 있는 RPY/RPYM: {text_scripts}개\n",
                 encoding="utf-8",
             )
 
-            output_files = [p for p in workdir.rglob("*") if p.is_file()]
-            with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
-                total_files = len(output_files)
-                for index, path in enumerate(output_files, 1):
-                    self.set_progress(index, total_files, f"결과 ZIP 생성 · {index}/{total_files}")
-                    archive.write(path, path.relative_to(workdir))
-
-                if options["make_original"]:
-                    self.add_original_to_zip(archive, src)
-
-            self.result = (ok, fail, extracted_count)
+            self.result = (ok, fail, extracted_count, text_scripts)
+            self.set_progress(1, 1, "디컴파일 완료 · 압축 없이 폴더로 저장됨")
             self.after(0, self.finish_success)
         except Exception as exc:
             error_text = str(exc)
             self.after(0, lambda msg=error_text: messagebox.showerror(APP, f"작업 중 오류가 발생했습니다.\n\n{msg}"))
             self.after(0, lambda: self.status.set("작업 실패"))
-        finally:
-            try:
-                if workdir.exists():
-                    shutil.rmtree(workdir)
-            except Exception:
-                pass
 
     def finish_success(self):
         self.page = 4
         self.render()
 
     def page_done(self):
-        ok, fail, extracted = getattr(self, "result", (0, 0, 0))
+        ok, fail, extracted, text_scripts = getattr(self, "result", (0, 0, 0, 0))
         outer, body = card(self.container)
         outer.pack(fill="x")
         ttk.Label(body, text="✓  디컴파일 완료", style="Section.TLabel").pack(anchor="center")
         ttk.Label(
             body,
-            text=f"성공 {ok}개  ·  실패 {fail}개  ·  RPA 추출 {extracted}개",
+            text=f"성공 {ok}개 · 실패 {fail}개 · RPA 추출 {extracted}개 · RPY/RPYM {text_scripts}개",
             style="Muted.Card.TLabel",
         ).pack(anchor="center", pady=(5, 12))
-        ttk.Label(body, text=str(self.output_zip), style="Muted.Card.TLabel").pack(anchor="center")
+        ttk.Label(body, text="ZIP이 아니라 아래 폴더에 바로 저장했습니다.", style="Muted.Card.TLabel").pack(anchor="center")
+        ttk.Label(body, text=str(self.output_dir), style="Muted.Card.TLabel").pack(anchor="center", pady=(4, 0))
 
         row = ttk.Frame(self.container)
         row.pack(fill="x", pady=(18, 0))
         ttk.Button(row, text="처음으로", style="Secondary.TButton", command=self.restart).pack(side="left")
-        ttk.Button(row, text="결과 위치 열기", style="Primary.TButton", command=self.open_output).pack(side="right")
+        ttk.Button(row, text="결과 폴더 열기", style="Primary.TButton", command=self.open_output).pack(side="right")
 
     def restart(self):
         self.page = 1
@@ -415,9 +391,9 @@ class ExtractorApp(tk.Tk):
 
     def open_output(self):
         try:
-            os.startfile(str(self.output_zip.parent))
+            os.startfile(str(self.output_dir))
         except Exception:
-            messagebox.showinfo(APP, f"결과 위치:\n{self.output_zip.parent}")
+            messagebox.showinfo(APP, f"결과 위치:\n{self.output_dir}")
 
 
 if __name__ == "__main__":
