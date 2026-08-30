@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import random
 import re
 import shutil
 import threading
@@ -8,7 +9,7 @@ import time
 import urllib.parse
 import urllib.request
 import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import tkinter as tk
@@ -17,7 +18,7 @@ from tkinter import filedialog, messagebox, ttk
 from ui_common import *
 
 APP = "RenPy AI Patcher"
-VERSION = "0.2.4"
+VERSION = "0.2.5"
 
 LANGS = {
     "한국어": ("korean", "ko"), "English": ("english", "en"), "日本語": ("japanese", "ja"),
@@ -32,6 +33,7 @@ SKIP_PREFIXES = (
     "label ", "define ", "default ", "$", "python:", "init python:", "transform ", "style ", "screen "
 )
 
+
 def looks_translatable(line, text):
     s = line.strip()
     if not text.strip() or s.startswith("#") or any(s.lower().startswith(p) for p in SKIP_PREFIXES):
@@ -42,21 +44,27 @@ def looks_translatable(line, text):
         return False
     return True
 
+
 def mask_tokens(text):
     tokens = []
+
     def repl(m):
         key = f"__RPTOKEN_{len(tokens)}__"
         tokens.append((key, m.group(0)))
         return key
+
     return re.sub(r'(\{[^{}]*\}|\[[^\[\]]*\])', repl, text), tokens
+
 
 def unmask(text, tokens):
     for key, value in tokens:
         text = text.replace(key, value)
     return text
 
+
 def escape_rpy(text):
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
 
 class Translator:
     def __init__(self, provider, source, target, key="", url="", model=""):
@@ -83,8 +91,15 @@ class Translator:
             "https://translate.googleapis.com/translate_a/single?client=gtx"
             f"&sl={urllib.parse.quote(self.source)}&tl={urllib.parse.quote(self.target)}&dt=t&q={q}"
         )
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=20) as response:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json,text/plain,*/*",
+                "Connection": "close",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=15) as response:
             data = json.loads(response.read().decode("utf-8"))
         return "".join(x[0] for x in data[0] if x and x[0])
 
@@ -105,11 +120,13 @@ class Translator:
             data = json.loads(response.read().decode())
         return data["choices"][0]["message"]["content"]
 
+
 def collect_rpy(root):
     game = root if root.name.lower() == "game" else root / "game"
     if not game.is_dir():
         raise RuntimeError("Ren'Py game 폴더를 찾지 못했습니다.")
     return game, [p for p in game.rglob("*.rpy") if "tl" not in p.relative_to(game).parts]
+
 
 def extract_strings(path):
     out, seen = [], set()
@@ -120,6 +137,7 @@ def extract_strings(path):
                 seen.add(value)
                 out.append((no, value))
     return out
+
 
 class PatcherApp(tk.Tk):
     def __init__(self):
@@ -152,7 +170,7 @@ class PatcherApp(tk.Tk):
 
     def header(self, active):
         ttk.Label(self.container, text=f"AI Patcher  v{VERSION}", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(self.container, text="Ren'Py AI 한글패치 제작 · 고속 병렬 번역 · 자동 이어하기", style="Subtitle.TLabel").pack(anchor="w", pady=(2, 16))
+        ttk.Label(self.container, text="Ren'Py AI 한글패치 제작 · 안정 병렬 번역 · 자동 이어하기", style="Subtitle.TLabel").pack(anchor="w", pady=(2, 16))
         stepper(self.container, active, ["게임 폴더 선택", "옵션 설정", "번역 및 패치", "완료"])
 
     def render(self):
@@ -217,7 +235,7 @@ class PatcherApp(tk.Tk):
         self.combo_row(left, "번역 방식", self.provider, PROVIDERS)
         ttk.Label(left, text="Google 동시 번역 수", style="Card.TLabel").pack(anchor="w", pady=(9, 3))
         ttk.Spinbox(left, from_=1, to=64, textvariable=self.google_workers, width=8).pack(anchor="w")
-        ttk.Label(left, text="무료 Google 번역 선택 시 적용 · 기본 20 · 권장 8~30", style="Muted.Card.TLabel").pack(anchor="w", pady=(4, 0))
+        ttk.Label(left, text="기본 20 · 8~30 권장 · 대량 작업도 메모리를 과하게 쓰지 않게 제한", style="Muted.Card.TLabel").pack(anchor="w", pady=(4, 0))
         ttk.Label(left, text="진행 상황은 자동 저장되며 같은 ZIP 이름을 선택하면 이어서 진행합니다.", style="Muted.Card.TLabel").pack(anchor="w", pady=(8, 0))
 
         ttk.Label(right, text="고급 연결 설정", style="Section.TLabel").pack(anchor="w", pady=(0, 10))
@@ -309,16 +327,16 @@ class PatcherApp(tk.Tk):
         self.after(0, update)
 
     @staticmethod
-    def translate_with_retry(translator, text):
+    def translate_with_retry(translator, text, attempts=4):
         last = None
-        for attempt in range(3):
+        for attempt in range(attempts):
             try:
                 return translator.translate(text), None
             except Exception as exc:
                 last = exc
-                if attempt < 2:
-                    time.sleep(0.5 * (attempt + 1))
-        return text, last
+                if attempt < attempts - 1:
+                    time.sleep((0.65 * (2 ** attempt)) + random.uniform(0.05, 0.35))
+        return None, last
 
     def checkpoint_path(self):
         return self.output_zip.with_suffix(self.output_zip.suffix + ".progress.json")
@@ -354,13 +372,47 @@ class PatcherApp(tk.Tk):
         path = self.checkpoint_path()
         tmp = path.with_suffix(path.suffix + ".tmp")
         data = {
-            "version": 1,
+            "version": 2,
             "signature": self.checkpoint_signature(options),
             "saved_at": time.time(),
             "translations": memory,
         }
         tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, path)
+
+    def run_bounded_pool(self, translator, texts, workers, on_result):
+        """Keep only a small number of futures queued so huge games start immediately."""
+        if not texts:
+            return
+        iterator = iter(texts)
+        max_inflight = max(workers, min(workers * 2, 96))
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="translate") as pool:
+            inflight = {}
+
+            def submit_one():
+                try:
+                    text = next(iterator)
+                except StopIteration:
+                    return False
+                future = pool.submit(self.translate_with_retry, translator, text)
+                inflight[future] = text
+                return True
+
+            for _ in range(max_inflight):
+                if not submit_one():
+                    break
+
+            while inflight:
+                done, _ = wait(tuple(inflight), return_when=FIRST_COMPLETED)
+                for future in done:
+                    src = inflight.pop(future)
+                    try:
+                        translated, error = future.result()
+                    except Exception as exc:
+                        translated, error = None, exc
+                    on_result(src, translated, error)
+                    submit_one()
 
     def worker(self):
         temp = self.output_zip.parent / (self.output_zip.stem + "_work")
@@ -388,37 +440,60 @@ class PatcherApp(tk.Tk):
             unique_set = set(unique)
             memory = {k: v for k, v in memory.items() if k in unique_set}
             pending = [text for text in unique if text not in memory]
-            failed = 0
             completed = len(memory)
             total = len(unique)
+            failures = []
             last_save = time.monotonic()
+            since_save = 0
+            started = time.monotonic()
 
-            self.add_log(f"[고속 번역] 전체 {len(items)}개 · 중복 제거 {total}개 · 동시 작업 {workers}개")
-            if completed:
-                self.progress(completed, total, f"이어하기 · {completed}/{total} 완료 · 남은 {len(pending)}개")
+            self.add_log(f"[안정 병렬 번역] 전체 {len(items)}개 · 중복 제거 {total}개 · 동시 작업 {workers}개")
+            self.add_log(f"[메모리 보호] 요청 {len(pending)}개를 한꺼번에 큐에 넣지 않고 최대 {max(workers, min(workers * 2, 96))}개만 유지합니다.")
+            self.progress(completed, total, f"번역 시작 · {completed}/{total} · {workers}개 동시")
 
-            if pending:
-                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="translate") as pool:
-                    futures = {pool.submit(self.translate_with_retry, translator, text): text for text in pending}
+            initial_completed = completed
+
+            def accept_result(src, translated, error):
+                nonlocal completed, since_save, last_save
+                if error is None and translated is not None:
+                    memory[src] = translated
+                else:
+                    failures.append(src)
+                    self.add_log(f"[번역 실패/재시도 예정] {src[:60]} · {error}")
+                completed += 1
+                since_save += 1
+                now = time.monotonic()
+                if since_save >= 10 or now - last_save >= 2.0 or completed == total:
+                    self.save_checkpoint(o, memory)
                     since_save = 0
-                    for future in as_completed(futures):
-                        src = futures[future]
-                        translated, error = future.result()
-                        memory[src] = translated
-                        completed += 1
-                        since_save += 1
-                        if error is not None:
-                            failed += 1
-                            self.add_log(f"[번역 실패] {src[:60]} · {error}")
+                    last_save = now
+                elapsed = max(now - started, 0.001)
+                speed = max(completed - initial_completed, 0) / elapsed
+                self.progress(completed, total, f"번역 중 · {completed}/{total} · {workers}개 동시 · {speed:.1f}문장/초 · 자동 저장")
 
-                        now = time.monotonic()
-                        if since_save >= 10 or now - last_save >= 2.0 or completed == total:
-                            self.save_checkpoint(o, memory)
-                            since_save = 0
-                            last_save = now
-                        self.progress(completed, total, f"고속 번역 중 · {completed}/{total} · {workers}개 동시 · 자동 저장")
+            self.run_bounded_pool(translator, pending, workers, accept_result)
+
+            unresolved = [src for src in failures if src not in memory]
+            if unresolved:
+                retry_workers = min(4, workers)
+                self.add_log(f"[안정화 재시도] 실패 {len(unresolved)}개를 동시 {retry_workers}개로 다시 시도합니다.")
+                retry_done = 0
+
+                def accept_retry(src, translated, error):
+                    nonlocal retry_done
+                    retry_done += 1
+                    if error is None and translated is not None:
+                        memory[src] = translated
+                    else:
+                        self.add_log(f"[최종 실패] {src[:60]} · {error}")
+                    if retry_done % 5 == 0 or retry_done == len(unresolved):
+                        self.save_checkpoint(o, memory)
+                    self.progress(retry_done, len(unresolved), f"실패 항목 안정화 재시도 · {retry_done}/{len(unresolved)} · {retry_workers}개 동시")
+
+                self.run_bounded_pool(translator, unresolved, retry_workers, accept_retry)
 
             self.save_checkpoint(o, memory)
+            final_failed = sum(1 for src in unique if src not in memory)
 
             grouped = {}
             for f, no, src in items:
@@ -436,7 +511,8 @@ class PatcherApp(tk.Tk):
             (temp / "패치_설명.txt").write_text(
                 "이 ZIP의 game 폴더를 원본 게임 최상위 폴더에 합치세요.\n"
                 f"번역 파일은 game/tl/{target_dir}/ 아래에 추가됩니다.\n"
-                f"고속 병렬 번역: {workers}개 동시 처리 / 이번 실행 번역 실패: {failed}개\n"
+                f"안정 병렬 번역: {workers}개 동시 처리 / 최종 번역 실패: {final_failed}개\n"
+                "대량 번역은 메모리 폭주를 막기 위해 제한된 수의 요청만 동시에 큐에 넣습니다.\n"
                 "진행 상황은 작업 중 자동 저장되며, 미완료 시 같은 ZIP 이름으로 다시 시작하면 이어집니다.\n"
                 "원본 게임 전체를 재배포하지 말고, 배포 권리가 있는 패치만 공유하세요.\n",
                 encoding="utf-8",
@@ -495,6 +571,7 @@ class PatcherApp(tk.Tk):
             os.startfile(str(self.output_zip.parent))
         except Exception:
             messagebox.showinfo(APP, f"결과 위치:\n{self.output_zip.parent}")
+
 
 if __name__ == "__main__":
     PatcherApp().mainloop()
