@@ -1,0 +1,54 @@
+name: Build Windows Installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller rpa-toolkit
+
+      - name: Build RenPyExtractor
+        run: |
+          python -m PyInstaller --noconfirm --clean --windowed --onefile --collect-all rpatool --name RenPyExtractor RenPyExtractor.py
+
+      - name: Build RenPyAIPatcher
+        run: |
+          python -m PyInstaller --noconfirm --clean --windowed --onefile --name RenPyAIPatcher RenPyAIPatcher.py
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      - name: Build Setup EXE
+        shell: powershell
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+
+      - name: Verify Setup EXE
+        shell: powershell
+        run: |
+          if (!(Test-Path "installer\RenPyTools_Setup.exe")) {
+            throw "RenPyTools_Setup.exe was not created"
+          }
+
+      - name: Upload Setup EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: RenPyTools-Setup-Windows-x64
+          path: installer/RenPyTools_Setup.exe
