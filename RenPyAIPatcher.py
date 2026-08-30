@@ -19,7 +19,7 @@ from tkinter import filedialog, messagebox, ttk
 from ui_common import *
 
 APP = "RenPy AI Patcher"
-VERSION = "0.2.6"
+VERSION = "0.2.7"
 
 LANGS = {
     "한국어": ("korean", "ko"), "English": ("english", "en"), "日本語": ("japanese", "ja"),
@@ -34,6 +34,8 @@ SKIP_PREFIXES = (
     "label ", "$", "python:", "init python:", "transform "
 )
 SCRIPT_EXTS = {".rpy", ".rpym"}
+BATCH_SIZE = 12
+BATCH_CHAR_LIMIT = 1800
 
 
 def looks_translatable(line, text):
@@ -75,7 +77,9 @@ def candidate_script_roots(root):
             candidates.append(item)
     try:
         for child in root.iterdir():
-            if child.is_dir() and child.name.lower() == "game" and child not in candidates:
+            if not child.is_dir():
+                continue
+            if child.name.lower() == "game" and child not in candidates:
                 candidates.append(child)
             nested = child / "game"
             if nested.is_dir() and nested not in candidates:
@@ -86,13 +90,11 @@ def candidate_script_roots(root):
 
 
 def collect_rpy(root):
-    best_root = None
-    best_files = []
+    best_root, best_files = None, []
     for candidate in candidate_script_roots(root):
         files = [
             p for p in candidate.rglob("*")
-            if p.is_file()
-            and p.suffix.lower() in SCRIPT_EXTS
+            if p.is_file() and p.suffix.lower() in SCRIPT_EXTS
             and "tl" not in [part.lower() for part in p.relative_to(candidate).parts]
         ]
         if len(files) > len(best_files):
@@ -113,15 +115,39 @@ def extract_strings(path):
     return out
 
 
+def make_batches(texts, max_items=BATCH_SIZE, max_chars=BATCH_CHAR_LIMIT):
+    batches, current, chars = [], [], 0
+    for text in texts:
+        cost = len(text) + 32
+        if current and (len(current) >= max_items or chars + cost > max_chars):
+            batches.append(current)
+            current, chars = [], 0
+        current.append(text)
+        chars += cost
+    if current:
+        batches.append(current)
+    return batches
+
+
 class Translator:
     def __init__(self, provider, source, target, key="", url="", model=""):
         self.provider, self.source, self.target = provider, source, target
         self.key, self.url, self.model = key.strip(), url.strip(), model.strip()
 
-    def translate(self, text):
+    def google_raw(self, text):
+        params = urllib.parse.urlencode({"client": "gtx", "sl": self.source, "tl": self.target, "dt": "t", "q": text})
+        req = urllib.request.Request(
+            "https://translate.googleapis.com/translate_a/single?" + params,
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json,text/plain,*/*", "Connection": "close"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        return "".join(x[0] for x in data[0] if x and x[0])
+
+    def translate_one(self, text):
         masked, tokens = mask_tokens(text)
         if self.provider == "무료 Google 번역":
-            out = self.google(masked)
+            out = self.google_raw(masked)
         elif self.provider == "Ollama (무료/로컬)":
             out = self.openai(masked, self.url or "http://127.0.0.1:11434/v1/chat/completions", self.model or "qwen2.5:7b", self.key or "ollama")
         elif self.provider == "LM Studio / OpenAI 호환":
@@ -132,15 +158,29 @@ class Translator:
             out = self.openai(masked, self.url, self.model, self.key)
         return unmask(out.strip(), tokens)
 
-    def google(self, text):
-        params = urllib.parse.urlencode({"client": "gtx", "sl": self.source, "tl": self.target, "dt": "t", "q": text})
-        req = urllib.request.Request(
-            "https://translate.googleapis.com/translate_a/single?" + params,
-            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json,text/plain,*/*", "Connection": "close"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode("utf-8"))
-        return "".join(x[0] for x in data[0] if x and x[0])
+    def translate_google_batch(self, texts):
+        masked_rows, token_rows, markers = [], [], []
+        for i, text in enumerate(texts):
+            masked, tokens = mask_tokens(text)
+            marker = f"ZXQRPSEP{i:04d}ZXQ"
+            markers.append(marker)
+            masked_rows.append(marker + "\n" + masked)
+            token_rows.append(tokens)
+        payload = "\n".join(masked_rows)
+        translated = self.google_raw(payload)
+        positions = []
+        for marker in markers:
+            pos = translated.find(marker)
+            if pos < 0:
+                raise RuntimeError("배치 구분자가 번역 중 변경되었습니다.")
+            positions.append(pos)
+        out = []
+        for i, marker in enumerate(markers):
+            start = positions[i] + len(marker)
+            end = positions[i + 1] if i + 1 < len(markers) else len(translated)
+            piece = translated[start:end].strip(" \r\n")
+            out.append(unmask(piece, token_rows[i]).strip())
+        return out
 
     def openai(self, text, url, model, key):
         payload = json.dumps({
@@ -171,7 +211,7 @@ class PatcherApp(tk.Tk):
         self.source_lang = tk.StringVar(value="자동 감지")
         self.target_lang = tk.StringVar(value="한국어")
         self.provider = tk.StringVar(value="무료 Google 번역")
-        self.google_workers = tk.IntVar(value=20)
+        self.google_workers = tk.IntVar(value=2)
         self.api_key = tk.StringVar()
         self.base_url = tk.StringVar()
         self.model = tk.StringVar()
@@ -190,7 +230,7 @@ class PatcherApp(tk.Tk):
 
     def header(self, active):
         ttk.Label(self.container, text=f"AI Patcher  v{VERSION}", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(self.container, text="Ren'Py AI 한글패치 제작 · 429 자동 속도조절 · 자동 이어하기", style="Subtitle.TLabel").pack(anchor="w", pady=(2, 16))
+        ttk.Label(self.container, text="Ren'Py AI 한글패치 제작 · Google 배치 번역 · 자동 이어하기", style="Subtitle.TLabel").pack(anchor="w", pady=(2, 16))
         stepper(self.container, active, ["게임 폴더 선택", "옵션 설정", "번역 및 패치", "완료"])
 
     def render(self):
@@ -241,10 +281,10 @@ class PatcherApp(tk.Tk):
         self.combo_row(left, "원본 언어", self.source_lang, list(SOURCE_CODES))
         self.combo_row(left, "번역 언어", self.target_lang, list(LANGS))
         self.combo_row(left, "번역 방식", self.provider, PROVIDERS)
-        ttk.Label(left, text="Google 최대 동시 번역 수", style="Card.TLabel").pack(anchor="w", pady=(9, 3))
-        ttk.Spinbox(left, from_=1, to=64, textvariable=self.google_workers, width=8).pack(anchor="w")
-        ttk.Label(left, text="429가 발생하면 자동으로 낮추고 안정되면 다시 올립니다.", style="Muted.Card.TLabel").pack(anchor="w", pady=(4, 0))
-        ttk.Label(left, text="성공한 번역은 자동 저장하고 실패 항목만 뒤에서 다시 시도합니다.", style="Muted.Card.TLabel").pack(anchor="w", pady=(8, 0))
+        ttk.Label(left, text="Google 동시 요청 수", style="Card.TLabel").pack(anchor="w", pady=(9, 3))
+        ttk.Spinbox(left, from_=1, to=8, textvariable=self.google_workers, width=8).pack(anchor="w")
+        ttk.Label(left, text="기본 2 · 요청 1개당 최대 12문장 묶음 번역 · 1~3 권장", style="Muted.Card.TLabel").pack(anchor="w", pady=(4, 0))
+        ttk.Label(left, text="429 발생 시 요청 수를 자동으로 낮추고 실패한 묶음만 다시 시도합니다.", style="Muted.Card.TLabel").pack(anchor="w", pady=(8, 0))
         ttk.Label(right, text="고급 연결 설정", style="Section.TLabel").pack(anchor="w", pady=(0, 10))
         ttk.Label(right, text="무료 Google 번역은 아래 항목을 비워도 됩니다.", style="Muted.Card.TLabel").pack(anchor="w", pady=(0, 10))
         self.entry_row(right, "API Key", self.api_key, show="•"); self.entry_row(right, "Model", self.model); self.entry_row(right, "Base URL", self.base_url)
@@ -255,9 +295,9 @@ class PatcherApp(tk.Tk):
     def back(self): self.page = max(1, self.page - 1); self.render()
 
     def start(self):
-        try: workers = max(1, min(64, int(self.google_workers.get())))
+        try: workers = max(1, min(8, int(self.google_workers.get())))
         except Exception:
-            messagebox.showerror(APP, "Google 동시 번역 수는 1~64 사이 숫자로 입력하세요."); return
+            messagebox.showerror(APP, "Google 동시 요청 수는 1~8 사이 숫자로 입력하세요."); return
         out = filedialog.asksaveasfilename(title="패치 ZIP 저장", defaultextension=".zip", filetypes=[("ZIP 파일", "*.zip")], initialfile=f"RenPy_{LANGS[self.target_lang.get()][0]}_patch.zip")
         if not out: return
         self.job_options = {"source_path": self.source_path.get(), "source_lang": self.source_lang.get(), "target_lang": self.target_lang.get(), "provider": self.provider.get(), "google_workers": workers, "api_key": self.api_key.get(), "base_url": self.base_url.get(), "model": self.model.get()}
@@ -291,12 +331,6 @@ class PatcherApp(tk.Tk):
             self.percent.config(text=f"{int(index / safe * 100)}%"); self.status.set(status)
         self.after(0, update)
 
-    @staticmethod
-    def translate_once(translator, text):
-        try: return translator.translate(text), None, False
-        except urllib.error.HTTPError as exc: return None, exc, exc.code == 429
-        except Exception as exc: return None, exc, False
-
     def checkpoint_path(self): return self.output_zip.with_suffix(self.output_zip.suffix + ".progress.json")
 
     def checkpoint_signature(self, options):
@@ -316,53 +350,79 @@ class PatcherApp(tk.Tk):
 
     def save_checkpoint(self, options, memory):
         path = self.checkpoint_path(); tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps({"version": 3, "signature": self.checkpoint_signature(options), "saved_at": time.time(), "translations": memory}, ensure_ascii=False), encoding="utf-8")
+        tmp.write_text(json.dumps({"version": 4, "signature": self.checkpoint_signature(options), "saved_at": time.time(), "translations": memory}, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, path)
 
-    def adaptive_translate(self, translator, pending, max_workers, memory, options, total, already_done):
-        queue = list(pending); attempts = {text: 0 for text in queue}; current = max_workers
-        min_workers = 1; success_streak = 0; started = time.monotonic(); processed = 0
+    def translate_google_batches(self, translator, pending, max_workers, memory, options, total):
+        queue = make_batches(pending)
+        current = min(max_workers, 3)
+        attempts = {}
+        started = time.monotonic()
+        self.add_log(f"[배치 번역] {len(pending)}문장 → {len(queue)}개 요청 묶음 · 묶음당 최대 {BATCH_SIZE}문장")
         while queue:
-            wave_size = min(len(queue), max(current * 2, current))
-            wave, queue = queue[:wave_size], queue[wave_size:]
-            results = []
-            with ThreadPoolExecutor(max_workers=current, thread_name_prefix="translate") as pool:
-                futures = {pool.submit(self.translate_once, translator, text): text for text in wave}
+            wave = queue[:max(current, 1) * 2]
+            queue = queue[len(wave):]
+            with ThreadPoolExecutor(max_workers=current, thread_name_prefix="google-batch") as pool:
+                futures = {pool.submit(translator.translate_google_batch, batch): batch for batch in wave}
+                rate_hits = 0
                 for future in as_completed(futures):
-                    text = futures[future]
-                    translated, error, rate_limited = future.result()
-                    results.append((text, translated, error, rate_limited))
-            rate_hits = 0; wave_success = 0
-            for text, translated, error, rate_limited in results:
-                attempts[text] += 1; processed += 1
-                if translated is not None and error is None:
-                    memory[text] = translated; wave_success += 1; success_streak += 1
-                else:
-                    if rate_limited: rate_hits += 1
-                    success_streak = 0
-                    if attempts[text] < 7:
-                        queue.append(text)
-                    else:
-                        self.add_log(f"[최종 실패] {text[:60]} · {error}")
-                if processed % 10 == 0:
-                    self.save_checkpoint(options, memory)
-                elapsed = max(time.monotonic() - started, 0.001)
-                speed = wave_success / max(elapsed, 0.001)
-                done_now = already_done + len(memory)
-                self.progress(min(done_now, total), total, f"번역 중 · 성공 {len(memory)}/{total} · 현재 {current}/{max_workers}개 동시 · 429 자동조절")
+                    batch = futures[future]
+                    key = tuple(batch)
+                    attempts[key] = attempts.get(key, 0) + 1
+                    try:
+                        translated = future.result()
+                        if len(translated) != len(batch):
+                            raise RuntimeError("배치 결과 개수 불일치")
+                        for src, dst in zip(batch, translated):
+                            if dst:
+                                memory[src] = dst
+                        self.save_checkpoint(options, memory)
+                    except urllib.error.HTTPError as exc:
+                        if exc.code == 429:
+                            rate_hits += 1
+                        if attempts[key] < 6:
+                            if len(batch) > 1 and attempts[key] >= 2:
+                                mid = max(1, len(batch) // 2)
+                                queue.extend([batch[:mid], batch[mid:]])
+                                self.add_log(f"[배치 축소] {len(batch)}문장 묶음 → {len(batch[:mid])}+{len(batch[mid:])}")
+                            else:
+                                queue.append(batch)
+                        else:
+                            self.add_log(f"[최종 실패] {len(batch)}문장 묶음 · HTTP {exc.code}")
+                    except Exception as exc:
+                        if len(batch) > 1:
+                            mid = max(1, len(batch) // 2)
+                            queue.extend([batch[:mid], batch[mid:]])
+                            self.add_log(f"[구분 실패/축소] {len(batch)}문장 묶음 → 더 작은 묶음")
+                        elif attempts[key] < 4:
+                            queue.append(batch)
+                        else:
+                            self.add_log(f"[최종 실패] {batch[0][:60]} · {exc}")
+                    elapsed = max(time.monotonic() - started, 0.001)
+                    speed = len(memory) / elapsed
+                    self.progress(min(len(memory), total), total, f"배치 번역 · 성공 {len(memory)}/{total} · 요청 {current}개 동시 · {speed:.1f}문장/초")
             if rate_hits:
-                new_current = max(min_workers, current // 2)
-                if new_current < current:
-                    self.add_log(f"[429 감지] {rate_hits}개 제한 · 병렬 {current} → {new_current}")
+                new_current = max(1, current - 1)
+                if new_current != current:
+                    self.add_log(f"[429 감지] 동시 요청 {current} → {new_current}")
                     current = new_current
-                wait_sec = min(8.0, 1.5 + rate_hits * 0.15) + random.uniform(0.1, 0.6)
-                time.sleep(wait_sec)
-            elif wave_success == len(results) and success_streak >= max(8, current * 2) and current < max_workers:
-                current = min(max_workers, current + max(1, current // 4))
-                success_streak = 0
-                self.add_log(f"[안정 회복] 병렬 수를 {current}개로 올립니다.")
-            elif not wave_success:
-                time.sleep(1.0)
+                time.sleep(min(12.0, 2.5 + rate_hits * 0.8) + random.uniform(0.2, 0.8))
+            elif current < min(max_workers, 3):
+                current += 1
+        self.save_checkpoint(options, memory)
+
+    def translate_other_provider(self, translator, pending, memory, options, total):
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="translate") as pool:
+            futures = {pool.submit(translator.translate_one, text): text for text in pending}
+            for i, future in enumerate(as_completed(futures), 1):
+                src = futures[future]
+                try:
+                    memory[src] = future.result()
+                except Exception as exc:
+                    self.add_log(f"[번역 실패] {src[:60]} · {exc}")
+                if i % 10 == 0:
+                    self.save_checkpoint(options, memory)
+                self.progress(len(memory), total, f"번역 중 · 성공 {len(memory)}/{total}")
         self.save_checkpoint(options, memory)
 
     def worker(self):
@@ -376,12 +436,14 @@ class PatcherApp(tk.Tk):
             if temp.exists(): shutil.rmtree(temp)
             patch_root = temp / "game" / "tl" / target_dir; patch_root.mkdir(parents=True)
             unique = list(dict.fromkeys(text for _, _, text in items)); total = len(unique)
-            max_workers = o["google_workers"] if o["provider"] == "무료 Google 번역" else 4
             memory = self.load_checkpoint(o); unique_set = set(unique); memory = {k: v for k, v in memory.items() if k in unique_set}
             pending = [text for text in unique if text not in memory]
-            self.add_log(f"[번역 시작] 전체 {len(items)}개 · 중복 제거 {total}개 · 최대 동시 {max_workers}개")
+            self.add_log(f"[번역 시작] 전체 {len(items)}개 · 중복 제거 {total}개 · 남은 {len(pending)}개")
             self.progress(len(memory), total, f"번역 시작 · 저장 {len(memory)}/{total}")
-            self.adaptive_translate(translator, pending, max_workers, memory, o, total, 0)
+            if o["provider"] == "무료 Google 번역":
+                self.translate_google_batches(translator, pending, o["google_workers"], memory, o, total)
+            else:
+                self.translate_other_provider(translator, pending, memory, o, total)
             final_failed = [src for src in unique if src not in memory]
             grouped = {}
             for f, no, src in items: grouped.setdefault(f, []).append((no, src, memory.get(src, src)))
@@ -390,7 +452,7 @@ class PatcherApp(tk.Tk):
                 lines = ["# Generated by RenPy AI Patcher", f"translate {target_dir} strings:", ""]
                 for no, old, new in entries: lines.extend([f"    # {rel.as_posix()}:{no}", f'    old "{escape_rpy(old)}"', f'    new "{escape_rpy(new)}"', ""])
                 dest.write_text("\n".join(lines), encoding="utf-8")
-            (temp / "패치_설명.txt").write_text(f"번역 파일: game/tl/{target_dir}/\n최종 미번역: {len(final_failed)}개\n429 발생 시 병렬 수를 자동 조절합니다.\n", encoding="utf-8")
+            (temp / "패치_설명.txt").write_text(f"번역 파일: game/tl/{target_dir}/\n최종 미번역: {len(final_failed)}개\nGoogle 번역은 요청당 최대 {BATCH_SIZE}문장을 묶어 처리합니다.\n", encoding="utf-8")
             self.progress(1, 1, "패치 ZIP 생성 중...")
             with zipfile.ZipFile(self.output_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
                 for path in temp.rglob("*"):
