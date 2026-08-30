@@ -1,8 +1,9 @@
 #define MyAppName "RenPy Tools"
-#define MyAppVersion "0.3.0"
+#define MyAppVersion "0.2.4"
 #define MyAppPublisher "RenPy Tools"
 
 [Setup]
+; Keep this AppId unchanged so every future installer is treated as an update.
 AppId={{7D9B6AC1-0A46-4C4A-A6FA-7B0DD5371F85}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
@@ -20,7 +21,17 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\RenPyAIPatcher.exe
 
+; Upgrade behaviour: reuse the installed folder and replace old program files.
+UsePreviousAppDir=yes
+UsePreviousGroup=yes
+UsePreviousTasks=yes
+CloseApplications=yes
+RestartApplications=no
+Uninstallable=yes
+CreateUninstallRegKey=yes
+
 [Files]
+; ignoreversion intentionally overwrites the previous EXEs during an in-place update.
 Source: "dist\RenPyExtractor.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\RenPyAIPatcher.exe"; DestDir: "{app}"; Flags: ignoreversion
 
