@@ -1,5 +1,5 @@
 #define MyAppName "RenPy Tools"
-#define MyAppVersion "0.2.9"
+#define MyAppVersion "0.3.0"
 #define MyAppPublisher "RenPy Tools"
 
 [Setup]
@@ -22,7 +22,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\RenPyAIPatcher.exe
 
 ; Upgrade behaviour: reuse the installed folder and replace old program files.
-; v0.2.9 adds automatic patch application after a fully successful translation.
+; v0.3.0 adds duplicate-safe translation output and standalone patch EXE creation.
 UsePreviousAppDir=yes
 UsePreviousGroup=yes
 UsePreviousTasks=yes
@@ -35,6 +35,7 @@ CreateUninstallRegKey=yes
 ; ignoreversion intentionally overwrites the previous EXEs during an in-place update.
 Source: "dist\RenPyExtractor.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\RenPyAIPatcher.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\RenPyPatchInstallerStub.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\RenPy Extractor"; Filename: "{app}\RenPyExtractor.exe"
