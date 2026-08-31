@@ -21,14 +21,21 @@ from tkinter import filedialog, messagebox, ttk
 from ui_common import *
 
 APP = "RenPy AI Patcher"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 LANGS = {
     "한국어": ("korean", "ko"), "English": ("english", "en"), "日本語": ("japanese", "ja"),
     "简体中文": ("schinese", "zh-CN"), "繁體中文": ("tchinese", "zh-TW"), "Español": ("spanish", "es"),
     "Français": ("french", "fr"), "Deutsch": ("german", "de"),
 }
 SOURCE_CODES = {"자동 감지": "auto", **{k: v[1] for k, v in LANGS.items()}}
-PROVIDERS = ["무료 Google 번역", "Ollama (무료/로컬)", "LM Studio / OpenAI 호환", "OpenAI 호환 API"]
+PROVIDERS = [
+    "무료 자동 선택 (추천)",
+    "무료 Google 번역",
+    "Lingva Translate (무료/키 없음)",
+    "MyMemory (무료/키 없음)",
+    "Ollama (무료/로컬 자동모델)",
+    "LM Studio (무료/로컬 자동모델)",
+]
 STRING_RE = re.compile(r'(?P<quote>["\'])(?P<text>(?:\\.|(?!\1).)*?)(?P=quote)')
 SKIP_PREFIXES = (
     "image ", "scene ", "show ", "hide ", "play ", "queue ", "stop ", "voice ", "jump ", "call ",
@@ -131,9 +138,21 @@ def make_batches(texts, max_items=BATCH_SIZE, max_chars=BATCH_CHAR_LIMIT):
 
 
 class Translator:
-    def __init__(self, provider, source, target, key="", url="", model=""):
+    LINGVA_INSTANCES = [
+        "https://lingva.ml",
+        "https://translate.plausibility.cloud",
+        "https://translate.projectsegfau.lt",
+    ]
+
+    def __init__(self, provider, source, target):
         self.provider, self.source, self.target = provider, source, target
-        self.key, self.url, self.model = key.strip(), url.strip(), model.strip()
+        self.google_blocked_until = 0.0
+        self._state_lock = threading.Lock()
+
+    def _request_json(self, url, data=None, headers=None, timeout=30):
+        req = urllib.request.Request(url, data=data, headers=headers or {"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
 
     def google_raw(self, text):
         params = urllib.parse.urlencode({"client": "gtx", "sl": self.source, "tl": self.target, "dt": "t", "q": text})
@@ -141,22 +160,127 @@ class Translator:
             "https://translate.googleapis.com/translate_a/single?" + params,
             headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json,text/plain,*/*", "Connection": "close"},
         )
-        with urllib.request.urlopen(req, timeout=20) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(req, timeout=20) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                with self._state_lock:
+                    self.google_blocked_until = max(self.google_blocked_until, time.time() + 90.0)
+            raise
         return "".join(x[0] for x in data[0] if x and x[0])
+
+    def lingva_raw(self, text):
+        last = None
+        encoded = urllib.parse.quote(text, safe="")
+        for base in self.LINGVA_INSTANCES:
+            try:
+                url = f"{base}/api/v1/{self.source}/{self.target}/{encoded}"
+                data = self._request_json(url, timeout=25)
+                out = data.get("translation", "") if isinstance(data, dict) else ""
+                if out:
+                    return out
+            except Exception as exc:
+                last = exc
+        raise RuntimeError(f"Lingva 공개 서버에 연결하지 못했습니다: {last}")
+
+    def mymemory_raw(self, text):
+        if self.source == "auto":
+            raise RuntimeError("MyMemory는 원본 언어 자동 감지를 지원하지 않습니다. 원본 언어를 직접 선택하세요.")
+        params = urllib.parse.urlencode({"q": text, "langpair": f"{self.source}|{self.target}", "mt": "1"})
+        data = self._request_json("https://api.mymemory.translated.net/get?" + params, timeout=25)
+        response = data.get("responseData", {}) if isinstance(data, dict) else {}
+        out = response.get("translatedText", "") if isinstance(response, dict) else ""
+        if not out:
+            raise RuntimeError("MyMemory가 번역 결과를 반환하지 않았습니다.")
+        return out
+
+    def _local_prompt(self, text):
+        return (
+            "Translate this visual novel text to " + self.target + ". "
+            "Return only the translated text. Preserve every __RPTOKEN_n__ placeholder exactly.\n" + text
+        )
+
+    def ollama_raw(self, text):
+        tags = self._request_json("http://127.0.0.1:11434/api/tags", timeout=8)
+        models = tags.get("models", []) if isinstance(tags, dict) else []
+        names = [m.get("name", "") for m in models if isinstance(m, dict) and m.get("name")]
+        if not names:
+            raise RuntimeError("Ollama에서 설치된 로컬 모델을 찾지 못했습니다.")
+        preferred = next((n for n in names if "qwen" in n.lower()), names[0])
+        payload = json.dumps({
+            "model": preferred,
+            "messages": [{"role": "user", "content": self._local_prompt(text)}],
+            "stream": False,
+        }).encode("utf-8")
+        data = self._request_json(
+            "http://127.0.0.1:11434/api/chat", data=payload,
+            headers={"Content-Type": "application/json"}, timeout=120,
+        )
+        message = data.get("message", {}) if isinstance(data, dict) else {}
+        out = message.get("content", "") if isinstance(message, dict) else ""
+        if not out:
+            raise RuntimeError("Ollama가 번역 결과를 반환하지 않았습니다.")
+        return out
+
+    def lmstudio_raw(self, text):
+        models = self._request_json("http://127.0.0.1:1234/v1/models", timeout=8)
+        rows = models.get("data", []) if isinstance(models, dict) else []
+        model = next((x.get("id") for x in rows if isinstance(x, dict) and x.get("id")), None)
+        if not model:
+            raise RuntimeError("LM Studio에서 로드된 로컬 모델을 찾지 못했습니다.")
+        payload = json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": self._local_prompt(text)}],
+            "temperature": 0.2,
+        }).encode("utf-8")
+        data = self._request_json(
+            "http://127.0.0.1:1234/v1/chat/completions", data=payload,
+            headers={"Content-Type": "application/json"}, timeout=120,
+        )
+        choices = data.get("choices", []) if isinstance(data, dict) else []
+        if not choices:
+            raise RuntimeError("LM Studio가 번역 결과를 반환하지 않았습니다.")
+        return choices[0].get("message", {}).get("content", "")
+
+    def auto_raw(self, text):
+        errors = []
+        with self._state_lock:
+            google_ready = time.time() >= self.google_blocked_until
+        if google_ready:
+            try:
+                return self.google_raw(text)
+            except Exception as exc:
+                errors.append("Google: " + str(exc))
+        else:
+            errors.append("Google: 429 대기 중")
+        try:
+            return self.lingva_raw(text)
+        except Exception as exc:
+            errors.append("Lingva: " + str(exc))
+        if self.source != "auto":
+            try:
+                return self.mymemory_raw(text)
+            except Exception as exc:
+                errors.append("MyMemory: " + str(exc))
+        raise RuntimeError("무료 자동 번역 실패 · " + " / ".join(errors))
 
     def translate_one(self, text):
         masked, tokens = mask_tokens(text)
-        if self.provider == "무료 Google 번역":
+        if self.provider == "무료 자동 선택 (추천)":
+            out = self.auto_raw(masked)
+        elif self.provider == "무료 Google 번역":
             out = self.google_raw(masked)
-        elif self.provider == "Ollama (무료/로컬)":
-            out = self.openai(masked, self.url or "http://127.0.0.1:11434/v1/chat/completions", self.model or "qwen2.5:7b", self.key or "ollama")
-        elif self.provider == "LM Studio / OpenAI 호환":
-            out = self.openai(masked, self.url or "http://127.0.0.1:1234/v1/chat/completions", self.model or "local-model", self.key or "lm-studio")
+        elif self.provider == "Lingva Translate (무료/키 없음)":
+            out = self.lingva_raw(masked)
+        elif self.provider == "MyMemory (무료/키 없음)":
+            out = self.mymemory_raw(masked)
+        elif self.provider == "Ollama (무료/로컬 자동모델)":
+            out = self.ollama_raw(masked)
+        elif self.provider == "LM Studio (무료/로컬 자동모델)":
+            out = self.lmstudio_raw(masked)
         else:
-            if not self.url or not self.model:
-                raise RuntimeError("OpenAI 호환 API는 Base URL과 Model이 필요합니다.")
-            out = self.openai(masked, self.url, self.model, self.key)
+            raise RuntimeError("지원하지 않는 무료 번역 엔진입니다.")
         return unmask(out.strip(), tokens)
 
     def translate_google_batch(self, texts):
@@ -181,23 +305,6 @@ class Translator:
             out.append(unmask(translated[start:end].strip(" \r\n"), token_rows[i]).strip())
         return out
 
-    def openai(self, text, url, model, key):
-        payload = json.dumps({
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "Translate visual novel text. Return only translated text. Preserve every __RPTOKEN_n__ placeholder exactly."},
-                {"role": "user", "content": f"Translate to {self.target}:\n{text}"},
-            ],
-            "temperature": 0.2,
-        }).encode()
-        headers = {"Content-Type": "application/json"}
-        if key:
-            headers["Authorization"] = "Bearer " + key
-        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=120) as response:
-            data = json.loads(response.read().decode())
-        return data["choices"][0]["message"]["content"]
-
 
 class PatcherApp(tk.Tk):
     def __init__(self):
@@ -209,12 +316,9 @@ class PatcherApp(tk.Tk):
         self.source_path = tk.StringVar()
         self.source_lang = tk.StringVar(value="자동 감지")
         self.target_lang = tk.StringVar(value="한국어")
-        self.provider = tk.StringVar(value="무료 Google 번역")
+        self.provider = tk.StringVar(value="무료 자동 선택 (추천)")
         self.google_workers = tk.IntVar(value=2)
         self.auto_apply = tk.BooleanVar(value=True)
-        self.api_key = tk.StringVar()
-        self.base_url = tk.StringVar()
-        self.model = tk.StringVar()
         self.scan = tk.StringVar(value="아직 게임을 선택하지 않았습니다.")
         self.status = tk.StringVar(value="")
         self.page = 1
@@ -235,7 +339,7 @@ class PatcherApp(tk.Tk):
 
     def header(self, active):
         ttk.Label(self.container, text=f"AI Patcher  v{VERSION}", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(self.container, text="Ren'Py AI 한글패치 제작 · 중복 안전 패치 · 독립 실행 EXE · 자동 적용", style="Subtitle.TLabel").pack(anchor="w", pady=(2, 16))
+        ttk.Label(self.container, text="Ren'Py AI 한글패치 제작 · 무료 번역 엔진 · 429 자동 우회 · 자동 패치", style="Subtitle.TLabel").pack(anchor="w", pady=(2, 16))
         stepper(self.container, active, ["게임 폴더 선택", "옵션 설정", "번역 및 패치", "완료"])
 
     def render(self):
@@ -304,11 +408,12 @@ class PatcherApp(tk.Tk):
         ttk.Label(left, text="번역 성공/실패/대기 목록은 앱을 껐다 켜도 기록됩니다.", style="Muted.Card.TLabel").pack(anchor="w", pady=(8, 0))
         ttk.Checkbutton(left, variable=self.auto_apply, text="번역 완료 후 원본 게임에 자동 패치 적용").pack(anchor="w", pady=(12, 0))
         ttk.Label(left, text="미번역 문장이 남으면 자동 적용하지 않습니다. 기존 같은 언어 패치는 백업 후 갱신합니다.", style="Muted.Card.TLabel").pack(anchor="w", padx=(24, 0), pady=(3, 0))
-        ttk.Label(right, text="고급 연결 설정", style="Section.TLabel").pack(anchor="w", pady=(0, 10))
-        ttk.Label(right, text="무료 Google 번역은 아래 항목을 비워도 됩니다.", style="Muted.Card.TLabel").pack(anchor="w", pady=(0, 10))
-        self.entry_row(right, "API Key", self.api_key, show="•")
-        self.entry_row(right, "Model", self.model)
-        self.entry_row(right, "Base URL", self.base_url)
+        ttk.Label(right, text="무료 엔진 안내", style="Section.TLabel").pack(anchor="w", pady=(0, 10))
+        ttk.Label(right, text="API Key가 필요한 번역 방식은 v0.3.1에서 제거했습니다.", style="Muted.Card.TLabel").pack(anchor="w", pady=(0, 8))
+        ttk.Label(right, text="무료 자동 선택: Google이 제한되면 Lingva로 자동 우회", style="Card.TLabel").pack(anchor="w", pady=(3, 0))
+        ttk.Label(right, text="MyMemory: 키 없이 사용 가능하지만 원본 언어 지정 필요 · 사용량 제한 있음", style="Muted.Card.TLabel").pack(anchor="w", pady=(3, 0))
+        ttk.Label(right, text="Ollama / LM Studio: PC에 설치·로드된 로컬 모델을 자동 선택", style="Muted.Card.TLabel").pack(anchor="w", pady=(3, 0))
+        ttk.Label(right, text="무료 서버는 외부 서비스 제한에 따라 일시적으로 느리거나 막힐 수 있습니다.", style="Muted.Card.TLabel").pack(anchor="w", pady=(12, 0))
         buttons = ttk.Frame(self.container)
         buttons.pack(fill="x", pady=(18, 0))
         ttk.Button(buttons, text="‹  이전", style="Secondary.TButton", command=self.back).pack(side="left")
@@ -360,8 +465,7 @@ class PatcherApp(tk.Tk):
         self.job_options = {
             "source_path": self.source_path.get(), "source_lang": self.source_lang.get(),
             "target_lang": self.target_lang.get(), "provider": self.provider.get(),
-            "google_workers": workers, "api_key": self.api_key.get(),
-            "base_url": self.base_url.get(), "model": self.model.get(),
+            "google_workers": workers, "base_url": "", "model": "",
             "auto_apply": self.auto_apply.get(), "apply_game_path": apply_game_path,
         }
         self.output_zip = Path(out)
@@ -601,6 +705,7 @@ class PatcherApp(tk.Tk):
         queue = make_batches(pending)
         current = min(max_workers, 3)
         attempts = {}
+        rate_rounds = 0
         started = time.monotonic()
         self.add_log(f"[배치 번역] {len(pending)}문장 → {len(queue)}개 요청 묶음 · 묶음당 최대 {BATCH_SIZE}문장")
         while queue:
@@ -650,16 +755,21 @@ class PatcherApp(tk.Tk):
                     done = len(memory)
                     self.progress(done, total, f"배치 번역 · 성공 {done}/{total} · 요청 {current}개 동시 · {done/elapsed:.1f}문장/초")
             if rate_hits:
+                rate_rounds += 1
                 new_current = max(1, current - 1)
                 if new_current != current:
                     self.add_log(f"[429 감지] 동시 요청 {current} → {new_current}")
                     current = new_current
-                time.sleep(min(12.0, 2.5 + rate_hits * 0.8) + random.uniform(0.2, 0.8))
-            elif current < min(max_workers, 3):
-                current += 1
+                wait = min(60.0, 5.0 * (2 ** min(rate_rounds - 1, 4)))
+                self.add_log(f"[429 자동 대기] {int(wait)}초 후 재시도 · 진행상황 저장됨")
+                time.sleep(wait + random.uniform(0.2, 0.8))
+            else:
+                rate_rounds = 0
+                if current < min(max_workers, 3):
+                    current += 1
 
     def translate_other_provider(self, translator, pending, memory, failures, options, sources, total):
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="translate") as pool:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="translate") as pool:
             futures = {pool.submit(translator.translate_one, text): text for text in pending}
             for i, future in enumerate(as_completed(futures), 1):
                 src = futures[future]
@@ -735,7 +845,7 @@ class PatcherApp(tk.Tk):
             if not items:
                 raise RuntimeError("번역 가능한 문자열을 찾지 못했습니다.")
             target_dir, target_code = LANGS[o["target_lang"]]
-            translator = Translator(o["provider"], SOURCE_CODES[o["source_lang"]], target_code, o["api_key"], o["base_url"], o["model"])
+            translator = Translator(o["provider"], SOURCE_CODES[o["source_lang"]], target_code)
             if temp.exists():
                 shutil.rmtree(temp)
             patch_root = temp / "game" / "tl" / target_dir
