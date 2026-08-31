@@ -22,6 +22,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\RenPyAIPatcher.exe
 
 ; Upgrade behaviour: reuse the installed folder and replace old program files.
+; v0.2.9 adds automatic patch application after a fully successful translation.
 UsePreviousAppDir=yes
 UsePreviousGroup=yes
 UsePreviousTasks=yes
