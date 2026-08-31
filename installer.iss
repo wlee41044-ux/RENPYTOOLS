@@ -1,5 +1,5 @@
 #define MyAppName "RenPy Tools"
-#define MyAppVersion "0.3.0"
+#define MyAppVersion "0.3.1"
 #define MyAppPublisher "RenPy Tools"
 
 [Setup]
@@ -22,7 +22,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\RenPyAIPatcher.exe
 
 ; Upgrade behaviour: reuse the installed folder and replace old program files.
-; v0.3.0 adds duplicate-safe translation output and standalone patch EXE creation.
+; v0.3.1 is free-only: no API-key providers, stronger 429 handling, more free engines.
 UsePreviousAppDir=yes
 UsePreviousGroup=yes
 UsePreviousTasks=yes
