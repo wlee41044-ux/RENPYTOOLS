@@ -1,0 +1,31 @@
+name: Apply v0.3.1 free-only upgrade
+
+on:
+  push:
+    paths:
+      - "v031.trigger"
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Apply v0.3.1 patch
+        run: |
+          python3 upgrade_v031.py
+          python3 -m py_compile RenPyAIPatcher.py
+
+      - name: Commit v0.3.1 source
+        run: |
+          git config user.name "wlee41044-ux"
+          git config user.email "wlee41044@gmail.com"
+          git add RenPyAIPatcher.py
+          git commit -m "Upgrade AI Patcher to v0.3.1 free-only providers"
+          git push
