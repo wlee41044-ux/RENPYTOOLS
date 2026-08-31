@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 from ui_common import *
 
 APP = "RenPy AI Patcher"
-VERSION = "0.2.8"
+VERSION = "0.2.9"
 LANGS = {
     "한국어": ("korean", "ko"), "English": ("english", "en"), "日本語": ("japanese", "ja"),
     "简体中文": ("schinese", "zh-CN"), "繁體中文": ("tchinese", "zh-TW"), "Español": ("spanish", "es"),
@@ -210,6 +210,7 @@ class PatcherApp(tk.Tk):
         self.target_lang = tk.StringVar(value="한국어")
         self.provider = tk.StringVar(value="무료 Google 번역")
         self.google_workers = tk.IntVar(value=2)
+        self.auto_apply = tk.BooleanVar(value=True)
         self.api_key = tk.StringVar()
         self.base_url = tk.StringVar()
         self.model = tk.StringVar()
@@ -220,6 +221,8 @@ class PatcherApp(tk.Tk):
         self.job_options = None
         self.current_history = None
         self.history_lock = threading.Lock()
+        self.applied_path = None
+        self.backup_path = None
         self.container = ttk.Frame(self, padding=24)
         self.container.pack(fill="both", expand=True)
         self.render()
@@ -230,7 +233,7 @@ class PatcherApp(tk.Tk):
 
     def header(self, active):
         ttk.Label(self.container, text=f"AI Patcher  v{VERSION}", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(self.container, text="Ren'Py AI 한글패치 제작 · 배치 번역 · 번역 기록/이어하기", style="Subtitle.TLabel").pack(anchor="w", pady=(2, 16))
+        ttk.Label(self.container, text="Ren'Py AI 한글패치 제작 · 배치 번역 · 기록/이어하기 · 자동 패치 적용", style="Subtitle.TLabel").pack(anchor="w", pady=(2, 16))
         stepper(self.container, active, ["게임 폴더 선택", "옵션 설정", "번역 및 패치", "완료"])
 
     def render(self):
@@ -297,6 +300,8 @@ class PatcherApp(tk.Tk):
         ttk.Spinbox(left, from_=1, to=8, textvariable=self.google_workers, width=8).pack(anchor="w")
         ttk.Label(left, text="기본 2 · 요청당 최대 12문장 · 1~3 권장", style="Muted.Card.TLabel").pack(anchor="w", pady=(4, 0))
         ttk.Label(left, text="번역 성공/실패/대기 목록은 앱을 껐다 켜도 기록됩니다.", style="Muted.Card.TLabel").pack(anchor="w", pady=(8, 0))
+        ttk.Checkbutton(left, variable=self.auto_apply, text="번역 완료 후 원본 게임에 자동 패치 적용").pack(anchor="w", pady=(12, 0))
+        ttk.Label(left, text="미번역 문장이 남으면 자동 적용하지 않습니다. 기존 같은 언어 패치는 백업 후 갱신합니다.", style="Muted.Card.TLabel").pack(anchor="w", padx=(24, 0), pady=(3, 0))
         ttk.Label(right, text="고급 연결 설정", style="Section.TLabel").pack(anchor="w", pady=(0, 10))
         ttk.Label(right, text="무료 Google 번역은 아래 항목을 비워도 됩니다.", style="Muted.Card.TLabel").pack(anchor="w", pady=(0, 10))
         self.entry_row(right, "API Key", self.api_key, show="•")
@@ -312,12 +317,37 @@ class PatcherApp(tk.Tk):
         self.page = max(1, self.page - 1)
         self.render()
 
+    @staticmethod
+    def resolve_game_for_apply(root, reject_decompiled=True):
+        root = Path(root)
+        if reject_decompiled and any(part.lower() == "decompiled" or part.lower().endswith("_decompiled") for part in root.parts):
+            return None
+        if root.name.lower() == "game" and root.is_dir():
+            return root
+        if (root / "game").is_dir():
+            return root / "game"
+        return None
+
     def start(self):
         try:
             workers = max(1, min(8, int(self.google_workers.get())))
         except Exception:
             messagebox.showerror(APP, "Google 동시 요청 수는 1~8 사이 숫자로 입력하세요.")
             return
+
+        apply_game_path = ""
+        if self.auto_apply.get():
+            apply_game = self.resolve_game_for_apply(self.source_path.get(), reject_decompiled=True)
+            if apply_game is None:
+                chosen = filedialog.askdirectory(title="자동 패치를 적용할 원본 Ren'Py 게임 폴더 선택")
+                if not chosen:
+                    messagebox.showinfo(APP, "자동 적용을 사용하려면 원본 게임 폴더를 선택해야 합니다.")
+                    return
+                apply_game = self.resolve_game_for_apply(chosen, reject_decompiled=False)
+                if apply_game is None:
+                    messagebox.showerror(APP, "선택한 폴더에서 game 폴더를 찾지 못했습니다.")
+                    return
+            apply_game_path = str(apply_game)
         out = filedialog.asksaveasfilename(
             title="패치 ZIP 저장", defaultextension=".zip",
             filetypes=[("ZIP 파일", "*.zip")],
@@ -330,6 +360,7 @@ class PatcherApp(tk.Tk):
             "target_lang": self.target_lang.get(), "provider": self.provider.get(),
             "google_workers": workers, "api_key": self.api_key.get(),
             "base_url": self.base_url.get(), "model": self.model.get(),
+            "auto_apply": self.auto_apply.get(), "apply_game_path": apply_game_path,
         }
         self.output_zip = Path(out)
         self.page = 3
@@ -639,6 +670,21 @@ class PatcherApp(tk.Tk):
                     self.save_state(options, sources, memory, failures, total)
                 self.progress(len(memory), total, f"번역 중 · 성공 {len(memory)}/{total}")
 
+    def apply_patch_to_game(self, patch_root, game_dir, target_dir):
+        game_dir = Path(game_dir)
+        if game_dir.name.lower() != "game" or not game_dir.is_dir():
+            raise RuntimeError("자동 적용 대상 game 폴더를 찾지 못했습니다.")
+        destination = game_dir / "tl" / target_dir
+        backup = None
+        if destination.exists() and any(destination.rglob("*")):
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            backup = game_dir / "tl" / "_RenPyTools_Backup" / f"{target_dir}_{stamp}"
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(destination, backup)
+        destination.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(patch_root, destination, dirs_exist_ok=True)
+        return destination, backup
+
     def worker(self):
         temp = self.output_zip.parent / (self.output_zip.stem + "_work")
         try:
@@ -691,6 +737,21 @@ class PatcherApp(tk.Tk):
                 for path in temp.rglob("*"):
                     if path.is_file():
                         archive.write(path, path.relative_to(temp))
+
+            self.applied_path = None
+            self.backup_path = None
+            if o.get("auto_apply"):
+                if final_failed:
+                    self.add_log(f"[자동 적용 보류] 미번역 {len(final_failed)}개가 남아 원본 게임은 변경하지 않았습니다.")
+                else:
+                    self.progress(1, 1, "원본 게임에 패치 자동 적용 중...")
+                    self.applied_path, self.backup_path = self.apply_patch_to_game(
+                        patch_root, o.get("apply_game_path", ""), target_dir
+                    )
+                    self.add_log(f"[자동 적용 완료] {self.applied_path}")
+                    if self.backup_path:
+                        self.add_log(f"[기존 패치 백업] {self.backup_path}")
+
             self.save_state(o, sources, memory, failures, total, completed=True)
             try:
                 self.checkpoint_path().unlink(missing_ok=True)
@@ -724,6 +785,11 @@ class PatcherApp(tk.Tk):
         ttk.Label(body, text="✓  한글패치 생성 완료", style="Section.TLabel").pack(anchor="center")
         ttk.Label(body, text=f"처리한 번역 후보 {getattr(self, 'result', 0)}개", style="Muted.Card.TLabel").pack(anchor="center", pady=(5, 12))
         ttk.Label(body, text=str(self.output_zip), style="Muted.Card.TLabel").pack(anchor="center")
+        if self.applied_path:
+            ttk.Label(body, text="✓ 원본 게임에 자동 패치 적용 완료", style="Muted.Card.TLabel").pack(anchor="center", pady=(8, 0))
+            ttk.Label(body, text=str(self.applied_path), style="Muted.Card.TLabel").pack(anchor="center", pady=(2, 0))
+            if self.backup_path:
+                ttk.Label(body, text=f"기존 패치 백업: {self.backup_path}", style="Muted.Card.TLabel").pack(anchor="center", pady=(2, 0))
         buttons = ttk.Frame(self.container)
         buttons.pack(fill="x", pady=(18, 0))
         ttk.Button(buttons, text="처음으로", style="Secondary.TButton", command=self.restart).pack(side="left")
