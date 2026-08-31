@@ -33,6 +33,14 @@ jobs:
         run: |
           python -m PyInstaller --noconfirm --clean --windowed --onefile --name RenPyAIPatcher RenPyAIPatcher.py
 
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build standalone patch installer stub
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /O2 /EHsc RenPyPatchInstallerStub.cpp /Fe:dist\RenPyPatchInstallerStub.exe /link /SUBSYSTEM:WINDOWS shell32.lib ole32.lib
+
       - name: Install Inno Setup
         run: choco install innosetup -y
 
@@ -46,6 +54,9 @@ jobs:
         run: |
           if (!(Test-Path "installer\RenPyTools_Setup.exe")) {
             throw "RenPyTools_Setup.exe was not created"
+          }
+          if (!(Test-Path "dist\RenPyPatchInstallerStub.exe")) {
+            throw "RenPyPatchInstallerStub.exe was not created"
           }
 
       - name: Upload Setup EXE
