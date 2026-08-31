@@ -1,0 +1,94 @@
+name: Apply v0.2.9 source patch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/patch-v029.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch AI Patcher to v0.2.9
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path("RenPyAIPatcher.py")
+          s = p.read_text(encoding="utf-8")
+
+          def rep(old, new):
+              global s
+              if old not in s:
+                  raise SystemExit("Expected source block not found:\n" + old[:300])
+              s = s.replace(old, new, 1)
+
+          rep('VERSION = "0.2.8"', 'VERSION = "0.2.9"')
+
+          rep(
+              '        self.google_workers = tk.IntVar(value=2)\n        self.api_key = tk.StringVar()',
+              '        self.google_workers = tk.IntVar(value=2)\n        self.auto_apply = tk.BooleanVar(value=True)\n        self.api_key = tk.StringVar()'
+          )
+
+          rep(
+              '        self.current_history = None\n        self.history_lock = threading.Lock()',
+              '        self.current_history = None\n        self.history_lock = threading.Lock()\n        self.applied_path = None\n        self.backup_path = None'
+          )
+
+          rep(
+              '        ttk.Label(self.container, text="Ren\'Py AI 한글패치 제작 · 배치 번역 · 번역 기록/이어하기", style="Subtitle.TLabel").pack(anchor="w", pady=(2, 16))',
+              '        ttk.Label(self.container, text="Ren\'Py AI 한글패치 제작 · 배치 번역 · 기록/이어하기 · 자동 패치 적용", style="Subtitle.TLabel").pack(anchor="w", pady=(2, 16))'
+          )
+
+          rep(
+              '        ttk.Label(left, text="번역 성공/실패/대기 목록은 앱을 껐다 켜도 기록됩니다.", style="Muted.Card.TLabel").pack(anchor="w", pady=(8, 0))',
+              '        ttk.Label(left, text="번역 성공/실패/대기 목록은 앱을 껐다 켜도 기록됩니다.", style="Muted.Card.TLabel").pack(anchor="w", pady=(8, 0))\n        ttk.Checkbutton(left, variable=self.auto_apply, text="번역 완료 후 원본 게임에 자동 패치 적용").pack(anchor="w", pady=(12, 0))\n        ttk.Label(left, text="미번역 문장이 남으면 자동 적용하지 않습니다. 기존 같은 언어 패치는 백업 후 갱신합니다.", style="Muted.Card.TLabel").pack(anchor="w", padx=(24, 0), pady=(3, 0))'
+          )
+
+          marker = '''    def start(self):\n        try:\n            workers = max(1, min(8, int(self.google_workers.get())))\n        except Exception:\n            messagebox.showerror(APP, "Google 동시 요청 수는 1~8 사이 숫자로 입력하세요.")\n            return\n'''
+          replacement = '''    @staticmethod\n    def resolve_game_for_apply(root, reject_decompiled=True):\n        root = Path(root)\n        if reject_decompiled and any(part.lower() == "decompiled" or part.lower().endswith("_decompiled") for part in root.parts):\n            return None\n        if root.name.lower() == "game" and root.is_dir():\n            return root\n        if (root / "game").is_dir():\n            return root / "game"\n        return None\n\n    def start(self):\n        try:\n            workers = max(1, min(8, int(self.google_workers.get())))\n        except Exception:\n            messagebox.showerror(APP, "Google 동시 요청 수는 1~8 사이 숫자로 입력하세요.")\n            return\n\n        apply_game_path = ""\n        if self.auto_apply.get():\n            apply_game = self.resolve_game_for_apply(self.source_path.get(), reject_decompiled=True)\n            if apply_game is None:\n                chosen = filedialog.askdirectory(title="자동 패치를 적용할 원본 Ren'Py 게임 폴더 선택")\n                if not chosen:\n                    messagebox.showinfo(APP, "자동 적용을 사용하려면 원본 게임 폴더를 선택해야 합니다.")\n                    return\n                apply_game = self.resolve_game_for_apply(chosen, reject_decompiled=False)\n                if apply_game is None:\n                    messagebox.showerror(APP, "선택한 폴더에서 game 폴더를 찾지 못했습니다.")\n                    return\n            apply_game_path = str(apply_game)\n'''
+          rep(marker, replacement)
+
+          rep(
+              '            "base_url": self.base_url.get(), "model": self.model.get(),\n        }',
+              '            "base_url": self.base_url.get(), "model": self.model.get(),\n            "auto_apply": self.auto_apply.get(), "apply_game_path": apply_game_path,\n        }'
+          )
+
+          worker_marker = '    def worker(self):\n        temp = self.output_zip.parent / (self.output_zip.stem + "_work")'
+          apply_method = '''    def apply_patch_to_game(self, patch_root, game_dir, target_dir):\n        game_dir = Path(game_dir)\n        if game_dir.name.lower() != "game" or not game_dir.is_dir():\n            raise RuntimeError("자동 적용 대상 game 폴더를 찾지 못했습니다.")\n        destination = game_dir / "tl" / target_dir\n        backup = None\n        if destination.exists() and any(destination.rglob("*")):\n            stamp = time.strftime("%Y%m%d_%H%M%S")\n            backup = game_dir / "tl" / "_RenPyTools_Backup" / f"{target_dir}_{stamp}"\n            backup.parent.mkdir(parents=True, exist_ok=True)\n            shutil.copytree(destination, backup)\n        destination.mkdir(parents=True, exist_ok=True)\n        shutil.copytree(patch_root, destination, dirs_exist_ok=True)\n        return destination, backup\n\n    def worker(self):\n        temp = self.output_zip.parent / (self.output_zip.stem + "_work")'''
+          rep(worker_marker, apply_method)
+
+          rep(
+              '            self.progress(1, 1, "패치 ZIP 생성 중...")\n            with zipfile.ZipFile(self.output_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:\n                for path in temp.rglob("*"):\n                    if path.is_file():\n                        archive.write(path, path.relative_to(temp))\n            self.save_state(o, sources, memory, failures, total, completed=True)',
+              '            self.progress(1, 1, "패치 ZIP 생성 중...")\n            with zipfile.ZipFile(self.output_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:\n                for path in temp.rglob("*"):\n                    if path.is_file():\n                        archive.write(path, path.relative_to(temp))\n\n            self.applied_path = None\n            self.backup_path = None\n            if o.get("auto_apply"):\n                if final_failed:\n                    self.add_log(f"[자동 적용 보류] 미번역 {len(final_failed)}개가 남아 원본 게임은 변경하지 않았습니다.")\n                else:\n                    self.progress(1, 1, "원본 게임에 패치 자동 적용 중...")\n                    self.applied_path, self.backup_path = self.apply_patch_to_game(\n                        patch_root, o.get("apply_game_path", ""), target_dir\n                    )\n                    self.add_log(f"[자동 적용 완료] {self.applied_path}")\n                    if self.backup_path:\n                        self.add_log(f"[기존 패치 백업] {self.backup_path}")\n\n            self.save_state(o, sources, memory, failures, total, completed=True)'
+          )
+
+          rep(
+              '        ttk.Label(body, text=str(self.output_zip), style="Muted.Card.TLabel").pack(anchor="center")',
+              '        ttk.Label(body, text=str(self.output_zip), style="Muted.Card.TLabel").pack(anchor="center")\n        if self.applied_path:\n            ttk.Label(body, text="✓ 원본 게임에 자동 패치 적용 완료", style="Muted.Card.TLabel").pack(anchor="center", pady=(8, 0))\n            ttk.Label(body, text=str(self.applied_path), style="Muted.Card.TLabel").pack(anchor="center", pady=(2, 0))\n            if self.backup_path:\n                ttk.Label(body, text=f"기존 패치 백업: {self.backup_path}", style="Muted.Card.TLabel").pack(anchor="center", pady=(2, 0))'
+          )
+
+          p.write_text(s, encoding="utf-8")
+
+          installer = Path("installer.iss")
+          ins = installer.read_text(encoding="utf-8")
+          if '#define MyAppVersion "0.2.8"' not in ins:
+              raise SystemExit("installer version block not found")
+          installer.write_text(ins.replace('#define MyAppVersion "0.2.8"', '#define MyAppVersion "0.2.9"', 1), encoding="utf-8")
+
+          compile(s, "RenPyAIPatcher.py", "exec")
+
+      - name: Commit v0.2.9
+        run: |
+          git config user.name "wlee41044-ux"
+          git config user.email "wlee41044@gmail.com"
+          git add RenPyAIPatcher.py installer.iss
+          git rm .github/workflows/patch-v029.yml
+          git commit -m "Add automatic game patch apply in v0.2.9"
+          git push
