@@ -39,7 +39,7 @@ jobs:
       - name: Build standalone patch installer stub
         shell: cmd
         run: |
-          cl /nologo /std:c++17 /O2 /EHsc RenPyPatchInstallerStub.cpp /Fe:dist\RenPyPatchInstallerStub.exe /link /SUBSYSTEM:WINDOWS shell32.lib ole32.lib
+          cl /nologo /std:c++17 /O2 /EHsc RenPyPatchInstallerStub.cpp /Fe:dist\RenPyPatchInstallerStub.exe /link /SUBSYSTEM:WINDOWS shell32.lib ole32.lib user32.lib
 
       - name: Install Inno Setup
         run: choco install innosetup -y
