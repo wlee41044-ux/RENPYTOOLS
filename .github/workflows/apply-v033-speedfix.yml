@@ -1,0 +1,30 @@
+name: Apply v0.3.3 translation speed hotfix
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'v033-speedfix.trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Apply v0.3.3 patch
+        run: python tools/apply_v033_speedfix.py
+      - name: Commit v0.3.3 source
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add RenPyAIPatcher.py installer.iss
+          git diff --cached --quiet && exit 0
+          git commit -m "Fix translation speed and stalls in v0.3.3"
+          git push
