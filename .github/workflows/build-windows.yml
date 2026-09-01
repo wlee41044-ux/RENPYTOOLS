@@ -29,9 +29,27 @@ jobs:
         run: |
           python -m PyInstaller --noconfirm --clean --windowed --onefile --collect-all rpatool --name RenPyExtractor RenPyExtractor.py
 
+      - name: Source self-test on Windows
+        shell: powershell
+        run: |
+          python RenPyAIPatcher.py --self-test
+          if ($LASTEXITCODE -ne 0) {
+            if (Test-Path "RenPyAIPatcher-selftest-error.txt") { Get-Content "RenPyAIPatcher-selftest-error.txt" }
+            throw "RenPyAIPatcher source self-test failed"
+          }
+
       - name: Build RenPyAIPatcher
         run: |
           python -m PyInstaller --noconfirm --clean --windowed --onefile --name RenPyAIPatcher RenPyAIPatcher.py
+
+      - name: Run built Patcher EXE self-test
+        shell: powershell
+        run: |
+          & ".\dist\RenPyAIPatcher.exe" --self-test
+          if ($LASTEXITCODE -ne 0) {
+            if (Test-Path "RenPyAIPatcher-selftest-error.txt") { Get-Content "RenPyAIPatcher-selftest-error.txt" }
+            throw "Built RenPyAIPatcher.exe self-test failed"
+          }
 
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
