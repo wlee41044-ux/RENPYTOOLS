@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - 'v036.speed.trigger'
+      - 'v036.speed2.trigger'
 
 permissions:
   contents: write
@@ -18,14 +19,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Apply v0.3.6 patch
-        run: python tools/apply_v036.py
+      - name: Apply v0.3.6 source patch
+        run: python tools/apply_v036_source.py
 
       - name: Commit v0.3.6 source
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add RenPyAIPatcher.py installer.iss .github/workflows/build-windows.yml
+          git add RenPyAIPatcher.py installer.iss
           git diff --cached --check
-          git commit -m "Speed up MyMemory and add Windows EXE self-test in v0.3.6"
+          git commit -m "Speed up MyMemory and add self-test mode in v0.3.6"
           git push
