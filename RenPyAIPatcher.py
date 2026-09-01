@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox, ttk
 from ui_common import *
 
 APP = "RenPy AI Patcher"
-VERSION = "0.3.5"
+VERSION = "0.3.6"
 LANGS = {
     "한국어": ("korean", "ko"), "English": ("english", "en"), "日本語": ("japanese", "ja"),
     "简体中文": ("schinese", "zh-CN"), "繁體中文": ("tchinese", "zh-TW"), "Español": ("spanish", "es"),
@@ -45,6 +45,9 @@ SCRIPT_EXTS = {".rpy", ".rpym"}
 BATCH_SIZE = 12
 BATCH_CHAR_LIMIT = 1800
 HISTORY_PAGE_SIZE = 200
+MYMEMORY_BATCH_BYTE_LIMIT = 430
+MYMEMORY_BATCH_ITEMS = 4
+MYMEMORY_MAX_WORKERS = 6
 
 
 def looks_translatable(line, text):
@@ -137,6 +140,21 @@ def make_batches(texts, max_items=BATCH_SIZE, max_chars=BATCH_CHAR_LIMIT):
     return batches
 
 
+def make_mymemory_batches(texts, max_items=MYMEMORY_BATCH_ITEMS, max_bytes=MYMEMORY_BATCH_BYTE_LIMIT):
+    """Pack short strings conservatively under MyMemory's 500-byte q limit."""
+    batches, current, used = [], [], 0
+    for text in texts:
+        cost = len(text.encode("utf-8")) + 24
+        if current and (len(current) >= max_items or used + cost > max_bytes):
+            batches.append(current)
+            current, used = [], 0
+        current.append(text)
+        used += cost
+    if current:
+        batches.append(current)
+    return batches
+
+
 def detect_source_code(texts):
     """Best-effort script detection used only to unlock free fallbacks.
 
@@ -220,8 +238,18 @@ class Translator:
     def mymemory_raw(self, text):
         if self.source == "auto":
             raise RuntimeError("MyMemory는 원본 언어 자동 감지를 지원하지 않습니다. 원본 언어를 직접 선택하세요.")
+        if len(text.encode("utf-8")) > 500:
+            raise RuntimeError("MyMemory 요청이 500바이트 제한을 초과했습니다.")
         params = urllib.parse.urlencode({"q": text, "langpair": f"{self.source}|{self.target}", "mt": "1"})
-        data = self._request_json("https://api.mymemory.translated.net/get?" + params, timeout=25)
+        data = self._request_json("https://api.mymemory.translated.net/get?" + params, timeout=15)
+        if isinstance(data, dict):
+            try:
+                status = int(data.get("responseStatus", 200) or 200)
+            except Exception:
+                status = 200
+            if status >= 400:
+                detail = str(data.get("responseDetails", "사용 제한 또는 서버 오류"))
+                raise RuntimeError(f"MyMemory HTTP {status}: {detail}")
         response = data.get("responseData", {}) if isinstance(data, dict) else {}
         out = response.get("translatedText", "") if isinstance(response, dict) else ""
         if not out:
@@ -336,6 +364,38 @@ class Translator:
             start = positions[i] + len(marker)
             end = positions[i + 1] if i + 1 < len(markers) else len(translated)
             out.append(unmask(translated[start:end].strip(" \r\n"), token_rows[i]).strip())
+        return out
+
+    def translate_mymemory_batch(self, texts):
+        if not texts:
+            return []
+        if len(texts) == 1:
+            return [self.translate_one(texts[0])]
+        masked_rows, token_rows, markers = [], [], []
+        for i, text in enumerate(texts):
+            masked, tokens = mask_tokens(text)
+            marker = f"ZXQMM{i:03d}ZXQ"
+            markers.append(marker)
+            masked_rows.append(marker + "\n" + masked)
+            token_rows.append(tokens)
+        payload = "\n".join(masked_rows)
+        if len(payload.encode("utf-8")) > 500:
+            raise RuntimeError("MyMemory 배치가 500바이트 제한을 초과했습니다.")
+        translated = self.mymemory_raw(payload)
+        positions = []
+        for marker in markers:
+            pos = translated.find(marker)
+            if pos < 0:
+                raise RuntimeError("MyMemory 배치 구분자가 번역 중 변경되었습니다.")
+            positions.append(pos)
+        out = []
+        for i, marker in enumerate(markers):
+            start = positions[i] + len(marker)
+            end = positions[i + 1] if i + 1 < len(markers) else len(translated)
+            value = unmask(translated[start:end].strip(" \r\n"), token_rows[i]).strip()
+            if not value:
+                raise RuntimeError("MyMemory 배치에서 빈 번역 결과가 나왔습니다.")
+            out.append(value)
         return out
 
 
@@ -854,7 +914,73 @@ class PatcherApp(tk.Tk):
         self.add_log(f"[무료 자동 전환 완료] {selected_name} · 남은 {len(remaining)}문장")
         self.progress(len(memory), total, f"{selected_name}로 계속 번역 중")
         if remaining:
-            self.translate_other_provider(selected, remaining, memory, failures, options, sources, total)
+            if selected_name == "MyMemory (무료/키 없음)":
+                self.translate_mymemory_batches(selected, remaining, memory, failures, options, sources, total)
+            else:
+                self.translate_other_provider(selected, remaining, memory, failures, options, sources, total)
+
+    def translate_mymemory_batches(self, translator, pending, memory, failures, options, sources, total):
+        queue = make_mymemory_batches(pending)
+        current = min(4, MYMEMORY_MAX_WORKERS)
+        attempts = {}
+        started = time.monotonic()
+        initial_done = len(memory)
+        self.add_log(
+            f"[MyMemory 고속 모드] {len(pending)}문장 → {len(queue)}개 묶음 · "
+            f"묶음당 최대 {MYMEMORY_BATCH_ITEMS}문장 · 동시 요청 {current}개"
+        )
+        while queue:
+            wave = queue[:max(1, current)]
+            queue = queue[len(wave):]
+            rate_hit = False
+            with ThreadPoolExecutor(max_workers=current, thread_name_prefix="mymemory-batch") as pool:
+                futures = {pool.submit(translator.translate_mymemory_batch, batch): batch for batch in wave}
+                for future in as_completed(futures):
+                    batch = futures[future]
+                    key = tuple(batch)
+                    attempts[key] = attempts.get(key, 0) + 1
+                    try:
+                        translated = future.result()
+                        if len(translated) != len(batch):
+                            raise RuntimeError("MyMemory 배치 결과 개수 불일치")
+                        for src, dst in zip(batch, translated):
+                            if dst:
+                                memory[src] = dst
+                                failures.pop(src, None)
+                    except Exception as exc:
+                        msg = str(exc)
+                        lower = msg.lower()
+                        if "http 403" in lower or "quota" in lower or "limit exceeded" in lower:
+                            self.save_state(options, sources, memory, failures, total)
+                            raise RuntimeError(
+                                "MyMemory 무료 일일 사용량 제한에 도달했습니다. 지금까지 번역은 저장했습니다. "
+                                "다른 무료 엔진을 사용하거나 제한이 초기화된 뒤 이어서 실행하세요."
+                            )
+                        if "http 429" in lower or "too many" in lower:
+                            rate_hit = True
+                        if len(batch) > 1:
+                            mid = max(1, len(batch) // 2)
+                            queue.extend([batch[:mid], batch[mid:]])
+                            self.add_log(f"[MyMemory 배치 축소] {len(batch)}문장 → {len(batch[:mid])}+{len(batch[mid:])}")
+                        elif attempts[key] < 3:
+                            queue.append(batch)
+                        else:
+                            failures[batch[0]] = msg
+                    elapsed = max(time.monotonic() - started, 0.001)
+                    newly_done = max(0, len(memory) - initial_done)
+                    speed = newly_done / elapsed
+                    self.progress(
+                        len(memory), total,
+                        f"MyMemory 고속 번역 · 성공 {len(memory)}/{total} · {current}개 동시 · {speed:.1f}문장/초"
+                    )
+            self.save_state(options, sources, memory, failures, total)
+            if rate_hit:
+                current = max(1, current // 2)
+                self.add_log(f"[MyMemory 요청 제한] 동시 요청을 {current}개로 낮추고 3초 대기합니다.")
+                time.sleep(3.0)
+            elif current < MYMEMORY_MAX_WORKERS:
+                current += 1
+        return True
 
     def translate_other_provider(self, translator, pending, memory, failures, options, sources, total):
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="translate") as pool:
@@ -898,7 +1024,7 @@ class PatcherApp(tk.Tk):
             loader_backup = backup_base / f"renpytools_language_{stamp}.rpy"
             shutil.copy2(language_loader, loader_backup)
         language_loader.write_text(
-            "# Generated by RenPy Tools v0.3.5\n"
+            "# Generated by RenPy Tools v0.3.6\n"
             "# Activates the language installed by RenPy Tools.\n"
             "init 999 python:\n"
             f"    config.language = {target_dir!r}\n",
@@ -982,16 +1108,18 @@ class PatcherApp(tk.Tk):
                     if fallback_pending:
                         self.add_log(f"[무료 자동 우회] Google에서 남은 {len(fallback_pending)}문장을 다른 무료 엔진으로 넘깁니다.")
                         self.translate_auto_fallback(translator, fallback_pending, memory, failures, o, sources, total)
+            elif o["provider"] == "MyMemory (무료/키 없음)":
+                self.translate_mymemory_batches(translator, pending, memory, failures, o, sources, total)
             else:
                 self.translate_other_provider(translator, pending, memory, failures, o, sources, total)
 
             final_failed = [src for src in sources if src not in memory]
             # Ren'Py rejects the same `old` value if it is registered in multiple
             # translate-strings blocks. `sources` is game-wide deduplicated, so
-            # v0.3.5 writes exactly one translation block and one entry per old text.
+            # v0.3.6 writes exactly one translation block and one entry per old text.
             dest = patch_root / "renpytools_strings.rpy"
             lines = [
-                "# Generated by RenPy AI Patcher v0.3.5",
+                "# Generated by RenPy AI Patcher v0.3.6",
                 "# Game-wide unique strings; duplicate old values are removed.",
                 f"translate {target_dir} strings:",
                 "",
@@ -1005,7 +1133,7 @@ class PatcherApp(tk.Tk):
             # language on games that do not expose a language selector themselves.
             language_loader = temp / "game" / "renpytools_language.rpy"
             language_loader.write_text(
-                "# Generated by RenPy Tools v0.3.5\n"
+                "# Generated by RenPy Tools v0.3.6\n"
                 "# Activates the language installed by RenPy Tools.\n"
                 "init 999 python:\n"
                 f"    config.language = {target_dir!r}\n",
@@ -1108,5 +1236,27 @@ class PatcherApp(tk.Tk):
             messagebox.showinfo(APP, f"결과 위치:\n{self.output_zip.parent}")
 
 
+def run_self_test():
+    try:
+        assert detect_source_code(["你好，世界", "再见"]) == "zh-CN"
+        assert detect_source_code(["こんにちは", "さようなら"]) == "ja"
+        rows = make_mymemory_batches(["你好", "再见", "今天怎么样？", "谢谢", "晚安"])
+        assert rows and all(1 <= len(row) <= MYMEMORY_BATCH_ITEMS for row in rows)
+        fake = Translator("MyMemory (무료/키 없음)", "zh-CN", "ko")
+        fake.mymemory_raw = lambda text: text.replace("你好", "안녕하세요").replace("再见", "안녕히 가세요")
+        translated = fake.translate_mymemory_batch(["你好", "再见"])
+        assert translated == ["안녕하세요", "안녕히 가세요"]
+        assert escape_rpy('a"b\nc') == 'a\"b\\nc'
+        return 0
+    except Exception as exc:
+        try:
+            Path("RenPyAIPatcher-selftest-error.txt").write_text(repr(exc), encoding="utf-8")
+        except Exception:
+            pass
+        return 1
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        raise SystemExit(run_self_test())
     PatcherApp().mainloop()
