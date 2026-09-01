@@ -45,10 +45,10 @@ jobs:
       - name: Run built Patcher EXE self-test
         shell: powershell
         run: |
-          & ".\dist\RenPyAIPatcher.exe" --self-test
-          if ($LASTEXITCODE -ne 0) {
+          $proc = Start-Process -FilePath ".\dist\RenPyAIPatcher.exe" -ArgumentList "--self-test" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
             if (Test-Path "RenPyAIPatcher-selftest-error.txt") { Get-Content "RenPyAIPatcher-selftest-error.txt" }
-            throw "Built RenPyAIPatcher.exe self-test failed"
+            throw "Built RenPyAIPatcher.exe self-test failed with exit code $($proc.ExitCode)"
           }
 
       - name: Setup MSVC
