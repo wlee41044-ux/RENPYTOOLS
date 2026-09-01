@@ -1,0 +1,29 @@
+name: Apply v0.3.4 failover hotfix
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'v034.trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Apply v0.3.4 patch
+        run: python tools/apply_v034.py
+      - name: Commit v0.3.4 source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add RenPyAIPatcher.py installer.iss
+          git diff --cached --quiet && exit 0
+          git commit -m "Fix 429 failover in v0.3.4"
+          git push
