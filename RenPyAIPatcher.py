@@ -7,6 +7,7 @@ import re
 import shutil
 import sys
 import threading
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -21,7 +22,7 @@ from tkinter import filedialog, messagebox, ttk
 from ui_common import *
 
 APP = "RenPy AI Patcher"
-VERSION = "0.3.6"
+VERSION = "0.3.7"
 LANGS = {
     "한국어": ("korean", "ko"), "English": ("english", "en"), "日本語": ("japanese", "ja"),
     "简体中文": ("schinese", "zh-CN"), "繁體中文": ("tchinese", "zh-TW"), "Español": ("spanish", "es"),
@@ -42,7 +43,7 @@ SKIP_PREFIXES = (
     "label ", "$", "python:", "init python:", "transform "
 )
 SCRIPT_EXTS = {".rpy", ".rpym"}
-BATCH_SIZE = 12
+BATCH_SIZE = 40
 BATCH_CHAR_LIMIT = 1800
 HISTORY_PAGE_SIZE = 200
 MYMEMORY_BATCH_BYTE_LIMIT = 430
@@ -410,7 +411,7 @@ class PatcherApp(tk.Tk):
         self.source_lang = tk.StringVar(value="자동 감지")
         self.target_lang = tk.StringVar(value="한국어")
         self.provider = tk.StringVar(value="무료 자동 선택 (추천)")
-        self.google_workers = tk.IntVar(value=2)
+        self.google_workers = tk.IntVar(value=3)
         self.auto_apply = tk.BooleanVar(value=True)
         self.scan = tk.StringVar(value="아직 게임을 선택하지 않았습니다.")
         self.status = tk.StringVar(value="")
@@ -496,14 +497,14 @@ class PatcherApp(tk.Tk):
         self.combo_row(left, "번역 언어", self.target_lang, list(LANGS))
         self.combo_row(left, "번역 방식", self.provider, PROVIDERS)
         ttk.Label(left, text="Google 동시 요청 수", style="Card.TLabel").pack(anchor="w", pady=(9, 3))
-        ttk.Spinbox(left, from_=1, to=8, textvariable=self.google_workers, width=8).pack(anchor="w")
-        ttk.Label(left, text="기본 2 · 요청당 최대 12문장 · 1~3 권장", style="Muted.Card.TLabel").pack(anchor="w", pady=(4, 0))
+        ttk.Spinbox(left, from_=1, to=4, textvariable=self.google_workers, width=8).pack(anchor="w")
+        ttk.Label(left, text="기본 3 · 요청당 최대 40문장 · 속도 우선 · 2~4 권장", style="Muted.Card.TLabel").pack(anchor="w", pady=(4, 0))
         ttk.Label(left, text="번역 성공/실패/대기 목록은 앱을 껐다 켜도 기록됩니다.", style="Muted.Card.TLabel").pack(anchor="w", pady=(8, 0))
         ttk.Checkbutton(left, variable=self.auto_apply, text="번역 완료 후 원본 게임에 자동 패치 적용").pack(anchor="w", pady=(12, 0))
-        ttk.Label(left, text="미번역 문장이 남으면 자동 적용하지 않습니다. 기존 같은 언어 패치는 백업 후 갱신합니다.", style="Muted.Card.TLabel").pack(anchor="w", padx=(24, 0), pady=(3, 0))
+        ttk.Label(left, text="일부 미번역은 원문으로 남긴 채 적용합니다. 기존 같은 언어 패치는 백업 후 갱신합니다.", style="Muted.Card.TLabel").pack(anchor="w", padx=(24, 0), pady=(3, 0))
         ttk.Label(right, text="무료 엔진 안내", style="Section.TLabel").pack(anchor="w", pady=(0, 10))
         ttk.Label(right, text="API Key가 필요한 번역 방식은 v0.3.1에서 제거했습니다.", style="Muted.Card.TLabel").pack(anchor="w", pady=(0, 8))
-        ttk.Label(right, text="무료 자동 선택: Google 배치 번역을 우선 사용하고 제한 시 속도를 자동 조절", style="Card.TLabel").pack(anchor="w", pady=(3, 0))
+        ttk.Label(right, text="무료 자동 선택: Google 대형 배치 고속 번역 · 느린 무료 엔진으로 자동 전환하지 않음", style="Card.TLabel").pack(anchor="w", pady=(3, 0))
         ttk.Label(right, text="MyMemory: 키 없이 사용 가능하지만 원본 언어 지정 필요 · 사용량 제한 있음", style="Muted.Card.TLabel").pack(anchor="w", pady=(3, 0))
         ttk.Label(right, text="Ollama / LM Studio: PC에 설치·로드된 로컬 모델을 자동 선택", style="Muted.Card.TLabel").pack(anchor="w", pady=(3, 0))
         ttk.Label(right, text="무료 서버는 외부 서비스 제한에 따라 일시적으로 느리거나 막힐 수 있습니다.", style="Muted.Card.TLabel").pack(anchor="w", pady=(12, 0))
@@ -656,13 +657,19 @@ class PatcherApp(tk.Tk):
                 memory.update(translations)
         return memory, failures
 
-    def save_state(self, options, sources, memory, failures, total, completed=False):
+    def save_state(self, options, sources, memory, failures, total, completed=False, force=False):
         now = time.time()
         data = {
-            "version": 5, "signature": self.signature(options), "saved_at": now,
+            "version": 6, "signature": self.signature(options), "saved_at": now,
             "total": total, "sources": sources, "translations": memory,
             "failures": failures, "completed": completed,
         }
+        # Keep the live history window current even when disk writes are throttled.
+        with self.history_lock:
+            self.current_history = data
+        last = getattr(self, "_last_disk_save", 0.0)
+        if not (completed or force or now - last >= 1.5):
+            return
         hp = self.history_path(options)
         tmp = hp.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -672,8 +679,7 @@ class PatcherApp(tk.Tk):
             ctmp = cp.with_suffix(cp.suffix + ".tmp")
             ctmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             os.replace(ctmp, cp)
-        with self.history_lock:
-            self.current_history = data
+        self._last_disk_save = now
 
     def list_history_files(self):
         rows = []
@@ -796,21 +802,24 @@ class PatcherApp(tk.Tk):
 
     def translate_google_batches(self, translator, pending, max_workers, memory, failures, options, sources, total, auto_failover=False):
         queue = make_batches(pending)
-        current = min(max_workers, 2)
-        attempts = {}
-        rate_rounds = 0
+        current = max(1, min(int(max_workers or 1), 4))
+        non_rate_attempts = {}
+        consecutive_429 = 0
         started = time.monotonic()
-        self.add_log(f"[배치 번역] {len(pending)}문장 → {len(queue)}개 요청 묶음 · 묶음당 최대 {BATCH_SIZE}문장")
+        initial_done = len(memory)
+        self.add_log(
+            f"[고속 배치 번역] {len(pending)}문장 → {len(queue)}개 요청 묶음 · "
+            f"묶음당 최대 {BATCH_SIZE}문장 · 동시 요청 {current}개"
+        )
         while queue:
-            wave = queue[:max(current, 1)]
+            wave = queue[:current]
             queue = queue[len(wave):]
-            with ThreadPoolExecutor(max_workers=current, thread_name_prefix="google-batch") as pool:
+            rate_limited = []
+            with ThreadPoolExecutor(max_workers=current, thread_name_prefix="google-fast") as pool:
                 futures = {pool.submit(translator.translate_google_batch, batch): batch for batch in wave}
-                rate_hits = 0
                 for future in as_completed(futures):
                     batch = futures[future]
                     key = tuple(batch)
-                    attempts[key] = attempts.get(key, 0) + 1
                     try:
                         translated = future.result()
                         if len(translated) != len(batch):
@@ -822,58 +831,59 @@ class PatcherApp(tk.Tk):
                         self.save_state(options, sources, memory, failures, total)
                     except urllib.error.HTTPError as exc:
                         if exc.code == 429:
-                            rate_hits += 1
-                        if attempts[key] < 4:
-                            if len(batch) > 1 and attempts[key] >= 2:
-                                mid = max(1, len(batch) // 2)
-                                queue.extend([batch[:mid], batch[mid:]])
-                                self.add_log(f"[배치 축소] {len(batch)}문장 → {len(batch[:mid])}+{len(batch[mid:])}")
-                            else:
-                                queue.append(batch)
+                            # Keep the batch intact. More/smaller requests make 429 worse.
+                            rate_limited.append(batch)
+                        elif len(batch) > 1:
+                            mid = max(1, len(batch) // 2)
+                            queue[:0] = [batch[:mid], batch[mid:]]
+                            self.add_log(f"[HTTP {exc.code} · 배치 축소] {len(batch)} → {len(batch[:mid])}+{len(batch[mid:])}")
                         else:
-                            for src in batch:
-                                failures[src] = f"HTTP {exc.code}"
-                            self.save_state(options, sources, memory, failures, total)
+                            non_rate_attempts[key] = non_rate_attempts.get(key, 0) + 1
+                            if non_rate_attempts[key] < 3:
+                                queue.insert(0, batch)
+                            else:
+                                failures[batch[0]] = f"HTTP {exc.code}"
                     except Exception as exc:
+                        non_rate_attempts[key] = non_rate_attempts.get(key, 0) + 1
                         if len(batch) > 1:
                             mid = max(1, len(batch) // 2)
-                            queue.extend([batch[:mid], batch[mid:]])
-                            self.add_log(f"[구분 실패/축소] {len(batch)}문장 묶음 → 더 작은 묶음")
-                        elif attempts[key] < 4:
-                            queue.append(batch)
+                            queue[:0] = [batch[:mid], batch[mid:]]
+                            self.add_log(f"[배치 자동 복구] {len(batch)}문장 묶음 → 더 작은 묶음")
+                        elif non_rate_attempts[key] < 3:
+                            queue.insert(0, batch)
                         else:
                             failures[batch[0]] = str(exc)
-                            self.save_state(options, sources, memory, failures, total)
                     elapsed = max(time.monotonic() - started, 0.001)
-                    done = len(memory)
-                    self.progress(done, total, f"배치 번역 · 성공 {done}/{total} · 요청 {current}개 동시 · {done/elapsed:.1f}문장/초")
-            if rate_hits:
-                rate_rounds += 1
-                if auto_failover:
-                    # A 429 means this IP is currently rate-limited. Do not keep
-                    # hammering the same endpoint in automatic mode. Preserve the
-                    # completed memory and immediately switch to a different free engine.
-                    with translator._state_lock:
-                        translator.google_blocked_until = max(translator.google_blocked_until, time.time() + 600.0)
-                    self.add_log("[429 자동 우회] Google 요청을 중단하고 다른 무료 엔진으로 전환합니다.")
-                    self.progress(len(memory), total, "Google 사용 제한 감지 · 다른 무료 엔진 확인 중")
-                    self.save_state(options, sources, memory, failures, total)
-                    return False
+                    translated_now = max(0, len(memory) - initial_done)
+                    speed = translated_now / elapsed
+                    self.progress(
+                        len(memory), total,
+                        f"고속 번역 · 성공 {len(memory)}/{total} · 요청 {current}개 동시 · {speed:.1f}문장/초"
+                    )
+
+            if rate_limited:
+                queue = rate_limited + queue
+                consecutive_429 += 1
                 new_current = max(1, current - 1)
                 if new_current != current:
                     self.add_log(f"[429 감지] 동시 요청 {current} → {new_current}")
                     current = new_current
-                wait = min(20.0, 4.0 * (2 ** min(rate_rounds - 1, 3)))
-                self.add_log(f"[429 자동 대기] {int(wait)}초 후 재시도 · 진행상황 저장됨")
-                self.progress(len(memory), total, f"Google 사용 제한 · {int(wait)}초 후 자동 재시도")
-                time.sleep(wait + random.uniform(0.2, 0.8))
+                wait = min(30.0, float(2 ** min(consecutive_429, 5)))
+                self.add_log(f"[429 대기] 큰 묶음은 유지 · {int(wait)}초 후 재시도")
+                self.progress(len(memory), total, f"Google 사용 제한 · {int(wait)}초 대기 · 진행 저장됨")
+                self.save_state(options, sources, memory, failures, total, force=True)
+                if consecutive_429 >= 6:
+                    raise RuntimeError(
+                        "Google 번역이 계속 429 사용 제한을 반환했습니다. 현재 번역은 저장되어 있습니다. "
+                        "잠시 후 같은 설정으로 다시 실행하면 이어서 번역합니다."
+                    )
+                time.sleep(wait + random.uniform(0.1, 0.4))
             else:
-                rate_rounds = 0
-                if current < min(max_workers, 2):
+                consecutive_429 = 0
+                if current < min(int(max_workers or 1), 4):
                     current += 1
-                # A tiny pacing delay is much faster than hitting a long 429 cooldown.
-                if queue:
-                    time.sleep(0.35 + random.uniform(0.05, 0.15))
+                # No fixed pacing in speed mode. Large batches already reduce request count.
+        self.save_state(options, sources, memory, failures, total, force=True)
         return True
 
     def translate_auto_fallback(self, translator, pending, memory, failures, options, sources, total):
@@ -1024,7 +1034,7 @@ class PatcherApp(tk.Tk):
             loader_backup = backup_base / f"renpytools_language_{stamp}.rpy"
             shutil.copy2(language_loader, loader_backup)
         language_loader.write_text(
-            "# Generated by RenPy Tools v0.3.6\n"
+            "# Generated by RenPy Tools v0.3.7\n"
             "# Activates the language installed by RenPy Tools.\n"
             "init 999 python:\n"
             f"    config.language = {target_dir!r}\n",
@@ -1084,11 +1094,8 @@ class PatcherApp(tk.Tk):
             patch_root.mkdir(parents=True)
             sources = list(dict.fromkeys(text for _, _, text in items))
             total = len(sources)
-            if translator.source == "auto":
-                detected_source = detect_source_code(sources)
-                if detected_source:
-                    translator.source = detected_source
-                    self.add_log(f"[원본 언어 자동 판별] {detected_source} · 무료 우회 엔진에서도 사용합니다.")
+            # Keep Google source detection as `auto`. v0.3.5 started forcing a
+            # guessed language here only to unlock slow fallback providers.
             memory, failures = self.load_saved_memory(o)
             source_set = set(sources)
             memory = {k: v for k, v in memory.items() if k in source_set}
@@ -1098,16 +1105,9 @@ class PatcherApp(tk.Tk):
             self.add_log(f"[번역 시작] 전체 {len(items)}개 · 중복 제거 {total}개 · 복원 {len(memory)}개 · 남은 {len(pending)}개")
             self.progress(len(memory), total, f"번역 시작 · 저장 {len(memory)}/{total}")
             if o["provider"] in ("무료 Google 번역", "무료 자동 선택 (추천)"):
-                auto_mode = o["provider"] == "무료 자동 선택 (추천)"
                 self.translate_google_batches(
-                    translator, pending, o["google_workers"], memory, failures, o, sources, total,
-                    auto_failover=auto_mode,
+                    translator, pending, o["google_workers"], memory, failures, o, sources, total
                 )
-                if auto_mode:
-                    fallback_pending = [src for src in sources if src not in memory]
-                    if fallback_pending:
-                        self.add_log(f"[무료 자동 우회] Google에서 남은 {len(fallback_pending)}문장을 다른 무료 엔진으로 넘깁니다.")
-                        self.translate_auto_fallback(translator, fallback_pending, memory, failures, o, sources, total)
             elif o["provider"] == "MyMemory (무료/키 없음)":
                 self.translate_mymemory_batches(translator, pending, memory, failures, o, sources, total)
             else:
@@ -1116,10 +1116,10 @@ class PatcherApp(tk.Tk):
             final_failed = [src for src in sources if src not in memory]
             # Ren'Py rejects the same `old` value if it is registered in multiple
             # translate-strings blocks. `sources` is game-wide deduplicated, so
-            # v0.3.6 writes exactly one translation block and one entry per old text.
+            # v0.3.7 writes exactly one translation block and one entry per old text.
             dest = patch_root / "renpytools_strings.rpy"
             lines = [
-                "# Generated by RenPy AI Patcher v0.3.6",
+                "# Generated by RenPy AI Patcher v0.3.7",
                 "# Game-wide unique strings; duplicate old values are removed.",
                 f"translate {target_dir} strings:",
                 "",
@@ -1133,7 +1133,7 @@ class PatcherApp(tk.Tk):
             # language on games that do not expose a language selector themselves.
             language_loader = temp / "game" / "renpytools_language.rpy"
             language_loader.write_text(
-                "# Generated by RenPy Tools v0.3.6\n"
+                "# Generated by RenPy Tools v0.3.7\n"
                 "# Activates the language installed by RenPy Tools.\n"
                 "init 999 python:\n"
                 f"    config.language = {target_dir!r}\n",
@@ -1154,29 +1154,25 @@ class PatcherApp(tk.Tk):
 
             self.standalone_path = None
             if final_failed:
-                self.add_log(f"[독립 EXE 보류] 미번역 {len(final_failed)}개가 남아 설치 EXE를 만들지 않았습니다.")
-            else:
-                try:
-                    self.progress(1, 1, "공유용 독립 패치 EXE 생성 중...")
-                    self.standalone_path = self.build_standalone_patch(patch_root, target_dir)
-                    self.add_log(f"[독립 EXE 생성] {self.standalone_path}")
-                except Exception as exc:
-                    # Keep the ZIP/auto-apply result even if only EXE packaging fails.
-                    self.add_log(f"[독립 EXE 생성 실패] {exc}")
+                self.add_log(f"[속도 우선] 미번역 {len(final_failed)}개는 원문으로 유지합니다.")
+            try:
+                self.progress(1, 1, "공유용 독립 패치 EXE 생성 중...")
+                self.standalone_path = self.build_standalone_patch(patch_root, target_dir)
+                self.add_log(f"[독립 EXE 생성] {self.standalone_path}")
+            except Exception as exc:
+                # Keep the ZIP/auto-apply result even if only EXE packaging fails.
+                self.add_log(f"[독립 EXE 생성 실패] {exc}")
 
             self.applied_path = None
             self.backup_path = None
             if o.get("auto_apply"):
-                if final_failed:
-                    self.add_log(f"[자동 적용 보류] 미번역 {len(final_failed)}개가 남아 원본 게임은 변경하지 않았습니다.")
-                else:
-                    self.progress(1, 1, "원본 게임에 패치 자동 적용 중...")
-                    self.applied_path, self.backup_path = self.apply_patch_to_game(
-                        patch_root, o.get("apply_game_path", ""), target_dir
-                    )
-                    self.add_log(f"[자동 적용 완료] {self.applied_path}")
-                    if self.backup_path:
-                        self.add_log(f"[기존 패치 백업] {self.backup_path}")
+                self.progress(1, 1, "원본 게임에 패치 자동 적용 중...")
+                self.applied_path, self.backup_path = self.apply_patch_to_game(
+                    patch_root, o.get("apply_game_path", ""), target_dir
+                )
+                self.add_log(f"[자동 적용 완료] {self.applied_path}")
+                if self.backup_path:
+                    self.add_log(f"[기존 패치 백업] {self.backup_path}")
 
             self.save_state(o, sources, memory, failures, total, completed=True)
             try:
@@ -1188,7 +1184,7 @@ class PatcherApp(tk.Tk):
         except Exception as exc:
             try:
                 if "o" in locals() and "sources" in locals() and "memory" in locals():
-                    self.save_state(o, sources, memory, failures if "failures" in locals() else {}, len(sources))
+                    self.save_state(o, sources, memory, failures if "failures" in locals() else {}, len(sources), force=True)
             except Exception:
                 pass
             msg = str(exc)
@@ -1238,14 +1234,36 @@ class PatcherApp(tk.Tk):
 
 def run_self_test():
     try:
-        assert detect_source_code(["你好，世界", "再见"]) == "zh-CN"
-        assert detect_source_code(["こんにちは", "さようなら"]) == "ja"
-        rows = make_mymemory_batches(["你好", "再见", "今天怎么样？", "谢谢", "晚安"])
-        assert rows and all(1 <= len(row) <= MYMEMORY_BATCH_ITEMS for row in rows)
-        fake = Translator("MyMemory (무료/키 없음)", "zh-CN", "ko")
-        fake.mymemory_raw = lambda text: text.replace("你好", "안녕하세요").replace("再见", "안녕히 가세요")
-        translated = fake.translate_mymemory_batch(["你好", "再见"])
-        assert translated == ["안녕하세요", "안녕히 가세요"]
+        # Large batches are the main speed lever.
+        sample = [f"短い台詞{i}" for i in range(95)]
+        rows = make_batches(sample)
+        assert rows
+        assert sum(len(row) for row in rows) == len(sample)
+        assert all(1 <= len(row) <= BATCH_SIZE for row in rows)
+
+        # Google batch separator parsing + Ren'Py token preservation.
+        fake = Translator("무료 Google 번역", "auto", "ko")
+        fake.google_raw = lambda value: value.replace("你好", "안녕하세요").replace("再见", "잘 가")
+        translated = fake.translate_google_batch(["你好 {name}", "再见"])
+        assert translated == ["안녕하세요 {name}", "잘 가"]
+
+        # The generated patch must actually be copied into game/tl/<language>
+        # and install the language activation loader.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            game = root / "game"
+            patch = root / "patch"
+            game.mkdir()
+            patch.mkdir()
+            (patch / "renpytools_strings.rpy").write_text(
+                'translate korean strings:\n    old "你好"\n    new "안녕하세요"\n',
+                encoding="utf-8",
+            )
+            destination, backup = PatcherApp.apply_patch_to_game(None, patch, game, "korean")
+            assert backup is None
+            assert (destination / "renpytools_strings.rpy").is_file()
+            loader = (game / "renpytools_language.rpy").read_text(encoding="utf-8")
+            assert "config.language = 'korean'" in loader
         return 0
     except Exception as exc:
         try:
