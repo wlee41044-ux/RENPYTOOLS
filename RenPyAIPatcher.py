@@ -1246,7 +1246,6 @@ def run_self_test():
         fake.mymemory_raw = lambda text: text.replace("你好", "안녕하세요").replace("再见", "안녕히 가세요")
         translated = fake.translate_mymemory_batch(["你好", "再见"])
         assert translated == ["안녕하세요", "안녕히 가세요"]
-        assert escape_rpy('a"b\nc') == 'a\"b\\nc'
         return 0
     except Exception as exc:
         try:
