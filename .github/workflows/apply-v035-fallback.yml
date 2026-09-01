@@ -1,0 +1,31 @@
+name: Apply v0.3.5 fallback repair
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - v035.trigger
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Apply v0.3.5 patch
+        run: |
+          python tools/apply_v035.py
+          python -m py_compile RenPyAIPatcher.py
+      - name: Commit v0.3.5 source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add RenPyAIPatcher.py installer.iss
+          git diff --cached --quiet && exit 0
+          git commit -m "Fix free fallback servers and source detection in v0.3.5"
+          git push
