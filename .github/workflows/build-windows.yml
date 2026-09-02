@@ -49,7 +49,7 @@ jobs:
 
       - name: Build RenPyAIPatcher
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --onefile --name RenPyAIPatcher RenPyToolsMain.py
+          python -m PyInstaller --noconfirm --clean --windowed --onefile --collect-all rpatool --name RenPyAIPatcher RenPyToolsMain.py
 
       - name: Run built Patcher EXE self-test
         shell: powershell
