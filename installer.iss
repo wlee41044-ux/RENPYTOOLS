@@ -1,5 +1,5 @@
 #define MyAppName "RenPy Tools"
-#define MyAppVersion "0.3.7"
+#define MyAppVersion "0.4.0"
 #define MyAppPublisher "RenPy Tools"
 
 [Setup]
@@ -22,7 +22,6 @@ ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\RenPyAIPatcher.exe
 
 ; Upgrade behaviour: reuse the installed folder and replace old program files.
-; v0.3.1 is free-only: no API-key providers, stronger 429 handling, more free engines.
 UsePreviousAppDir=yes
 UsePreviousGroup=yes
 UsePreviousTasks=yes
@@ -32,19 +31,18 @@ Uninstallable=yes
 CreateUninstallRegKey=yes
 
 [Files]
-; ignoreversion intentionally overwrites the previous EXEs during an in-place update.
 Source: "dist\RenPyExtractor.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\RenPyAIPatcher.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\RenPyPatchInstallerStub.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\RenPy Extractor"; Filename: "{app}\RenPyExtractor.exe"
-Name: "{group}\RenPy AI Patcher"; Filename: "{app}\RenPyAIPatcher.exe"
+Name: "{group}\RenPy Tools"; Filename: "{app}\RenPyAIPatcher.exe"
 Name: "{autodesktop}\RenPy Extractor"; Filename: "{app}\RenPyExtractor.exe"; Tasks: desktopicon
-Name: "{autodesktop}\RenPy AI Patcher"; Filename: "{app}\RenPyAIPatcher.exe"; Tasks: desktopicon
+Name: "{autodesktop}\RenPy Tools"; Filename: "{app}\RenPyAIPatcher.exe"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "바탕화면 바로가기 만들기"; GroupDescription: "추가 작업:"; Flags: unchecked
 
 [Run]
-Filename: "{app}\RenPyAIPatcher.exe"; Description: "RenPy AI Patcher 실행"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\RenPyAIPatcher.exe"; Description: "RenPy Tools 실행"; Flags: nowait postinstall skipifsilent
