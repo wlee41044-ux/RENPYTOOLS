@@ -15,6 +15,7 @@ from RenPyToolsApp import RenPyToolsApp, run_ui_self_test
 # The stable translation code stays unchanged; only file discovery is lighter.
 core.collect_rpy = collect_rpy_fast
 ui_module.collect_rpy = collect_rpy_fast
+ui_module.UI_VERSION = "0.4.1"
 
 
 class RenPyToolsMain(RenPyToolsApp):
@@ -29,8 +30,6 @@ class RenPyToolsMain(RenPyToolsApp):
         self.hq_manifest = None
         self._scan_busy = False
 
-        # Call the stable v0.3.7 base initializer directly. It creates the one
-        # and only Tk root, then invokes RenPyToolsApp.render().
         PatcherApp.__init__(self)
 
         self.hq_profile = tk.StringVar(master=self, value="ChatGPT (안전)")
@@ -41,11 +40,7 @@ class RenPyToolsMain(RenPyToolsApp):
         self.render()
 
     def _select_game_folder(self, next_route=None):
-        """Lightweight picker used by HQ/update flows.
-
-        Do not count every translatable sentence here. Large scripts are read by
-        the actual worker later, so Winlator's UI thread stays responsive.
-        """
+        """Lightweight picker used by HQ/update flows."""
         path = filedialog.askdirectory(title="Ren'Py 게임 폴더 선택")
         if not path:
             return False
@@ -97,7 +92,6 @@ class RenPyToolsMain(RenPyToolsApp):
         self.start_quick_translation()
 
     def start_quick_translation(self):
-        """Use the current Settings values; defaults still produce one-click mode."""
         source = self.source_path.get()
         try:
             collect_rpy_fast(Path(source))
