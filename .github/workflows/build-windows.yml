@@ -41,15 +41,15 @@ jobs:
       - name: UI workflow self-test on Windows
         shell: powershell
         run: |
-          python RenPyToolsLauncher.py --self-test
+          python RenPyToolsLauncherV047.py --self-test
           if ($LASTEXITCODE -ne 0) {
             if (Test-Path "RenPyToolsUI-selftest-error.txt") { Get-Content "RenPyToolsUI-selftest-error.txt" }
-            throw "RenPyToolsLauncher source self-test failed"
+            throw "RenPyToolsLauncherV047 source self-test failed"
           }
 
       - name: Build RenPyAIPatcher
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --onefile --collect-all rpatool --name RenPyAIPatcher RenPyToolsLauncher.py
+          python -m PyInstaller --noconfirm --clean --windowed --onefile --collect-all rpatool --name RenPyAIPatcher RenPyToolsLauncherV047.py
 
       - name: Run built Patcher EXE self-test
         shell: powershell
