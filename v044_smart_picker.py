@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import ctypes
+import json
 import os
 import re
 import tempfile
@@ -13,34 +15,180 @@ SKIP_SCAN_DIRS = {
     "windows", "program files", "program files (x86)", "$recycle.bin", "system volume information",
     "renpytools", "renpytools_output", "renpytools_highquality",
 }
+DOWNLOAD_NAMES = {"download", "downloads"}
 
 
-def downloads_root():
-    """Return the most useful Downloads folder for Winlator first, Windows second."""
-    candidates = [
-        Path("D:/Download"),
-        Path("D:/Downloads"),
-        Path.home() / "Downloads",
-        Path.home() / "Download",
+def _is_dir(path):
+    try:
+        return os.path.isdir(str(path))
+    except Exception:
+        return False
+
+
+def _norm_key(path):
+    try:
+        return os.path.normcase(os.path.abspath(str(path)))
+    except Exception:
+        return str(path).lower()
+
+
+def _appdata_dir():
+    base = os.getenv("APPDATA") or os.getenv("LOCALAPPDATA")
+    if base:
+        root = Path(base) / "RenPyTools"
+    else:
+        root = Path.home() / ".renpytools"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return root
+
+
+def _remember_file():
+    return _appdata_dir() / "picker_roots.json"
+
+
+def _download_ancestor(path):
+    """Return an existing Download/Downloads ancestor of a selected game."""
+    if not path:
+        return None
+    try:
+        current = Path(path)
+        if current.name.lower() == "game":
+            current = current.parent
+        for candidate in (current, *current.parents):
+            if candidate.name.lower() in DOWNLOAD_NAMES and _is_dir(candidate):
+                return candidate
+    except Exception:
+        pass
+    return None
+
+
+def remember_game_path(path):
+    """Remember the real shared-storage root selected through Wine's file dialog."""
+    if not path:
+        return
+    selected = Path(path)
+    root = _download_ancestor(selected)
+    if root is None:
+        # Even when the game is not inside Downloads, remembering its parent makes
+        # the next smart scan useful without walking an entire Android filesystem.
+        root = selected.parent if selected.name.lower() == "game" else selected.parent
+    if not _is_dir(root):
+        return
+    rows = []
+    try:
+        rows = json.loads(_remember_file().read_text("utf-8"))
+        if not isinstance(rows, list):
+            rows = []
+    except Exception:
+        rows = []
+    value = str(root)
+    rows = [x for x in rows if _norm_key(x) != _norm_key(value)]
+    rows.insert(0, value)
+    rows = rows[:8]
+    try:
+        _remember_file().write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def remembered_roots():
+    try:
+        rows = json.loads(_remember_file().read_text("utf-8"))
+    except Exception:
+        rows = []
+    out = []
+    if isinstance(rows, list):
+        for value in rows:
+            path = Path(str(value))
+            if _is_dir(path):
+                out.append(path)
+    return out
+
+
+def _logical_drives():
+    """Enumerate Wine/Windows drive letters without assuming only C: and D:."""
+    out = []
+    if os.name == "nt":
+        try:
+            mask = ctypes.windll.kernel32.GetLogicalDrives()
+            for index in range(26):
+                if mask & (1 << index):
+                    out.append(Path(f"{chr(65 + index)}:\\"))
+        except Exception:
+            pass
+    # Wine can occasionally omit a mapped drive from GetLogicalDrives while it
+    # is still reachable through the shell. Probe the common shared letters too.
+    for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
+        candidate = Path(f"{letter}:\\")
+        if _is_dir(candidate) and all(_norm_key(candidate) != _norm_key(x) for x in out):
+            out.append(candidate)
+    return out
+
+
+def shared_storage_candidates():
+    """Possible Android/Winlator shared Download roots, best candidates first."""
+    raw = [
+        Path(r"D:\Download"),
+        Path(r"D:\Downloads"),
+        Path(r"Z:\storage\emulated\0\Download"),
+        Path(r"Z:\storage\emulated\0\Downloads"),
+        Path(r"Z:\storage\self\primary\Download"),
+        Path(r"Z:\sdcard\Download"),
+        Path(r"Z:\mnt\sdcard\Download"),
     ]
-    profile = os.getenv("USERPROFILE")
-    if profile:
-        candidates.extend([Path(profile) / "Downloads", Path(profile) / "Download"])
 
-    seen = set()
-    for candidate in candidates:
-        key = str(candidate).lower()
+    # Any non-C Wine drive may be mapped directly to Android internal storage,
+    # or may contain a Download directory one level below it.
+    for drive in _logical_drives():
+        if str(drive).upper().startswith("C:"):
+            continue
+        raw.extend([drive / "Download", drive / "Downloads", drive])
+
+    profile = os.getenv("USERPROFILE")
+    raw.extend([Path.home() / "Downloads", Path.home() / "Download"])
+    if profile:
+        raw.extend([Path(profile) / "Downloads", Path(profile) / "Download"])
+
+    out, seen = [], set()
+    for candidate in [*remembered_roots(), *raw]:
+        key = _norm_key(candidate)
         if key in seen:
             continue
         seen.add(key)
-        try:
-            if candidate.is_dir():
-                return candidate
-        except Exception:
-            pass
+        if _is_dir(candidate):
+            out.append(candidate)
+    return out
+
+
+def downloads_root(preferred_path=None):
+    """Choose Android shared Downloads when possible; Windows Downloads is fallback."""
+    preferred = _download_ancestor(preferred_path)
+    if preferred is not None:
+        return preferred
+
+    candidates = shared_storage_candidates()
+    # Prefer an actual folder named Download/Downloads outside C:.
+    for candidate in candidates:
+        drive = str(candidate.drive or "").upper()
+        if candidate.name.lower() in DOWNLOAD_NAMES and drive != "C:":
+            return candidate
+    # A mapped non-C drive can itself be the Android shared Download directory.
+    for candidate in candidates:
+        drive = str(candidate.drive or "").upper()
+        if drive and drive != "C:" and candidate == Path(candidate.anchor):
+            return candidate
+    for candidate in candidates:
+        if candidate.name.lower() in DOWNLOAD_NAMES:
+            return candidate
 
     fallback = Path.home() / "Downloads"
-    fallback.mkdir(parents=True, exist_ok=True)
+    try:
+        fallback.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
     return fallback
 
 
@@ -53,7 +201,9 @@ def hq_workspace_for(game_path, stamp):
     root = Path(game_path)
     game_dir = root if root.name.lower() == "game" else root / "game"
     game_name = game_dir.parent.name if game_dir.name.lower() == "game" else root.name
-    base = downloads_root() / "RenPyTools" / "고품질번역" / safe_folder_name(game_name)
+    # Important for Winlator: use the Download ancestor of the game the user
+    # actually selected before trying Windows' C:\Users\...\Downloads.
+    base = downloads_root(game_path) / "RenPyTools" / "고품질번역" / safe_folder_name(game_name)
     workspace = base / stamp
     workspace.mkdir(parents=True, exist_ok=True)
     return workspace
@@ -61,10 +211,10 @@ def hq_workspace_for(game_path, stamp):
 
 def _game_folder(candidate):
     candidate = Path(candidate)
-    if candidate.name.lower() == "game" and candidate.is_dir():
+    if candidate.name.lower() == "game" and _is_dir(candidate):
         return candidate
     game = candidate / "game"
-    if game.is_dir():
+    if _is_dir(game):
         return game
     return None
 
@@ -82,15 +232,25 @@ def _has_renpy_payload(game):
 
     # Some games keep scripts one level below game/. Keep this bounded.
     try:
-        for child in list(Path(game).iterdir())[:120]:
-            if not child.is_dir():
-                continue
-            try:
-                for sub in list(child.iterdir())[:120]:
-                    if sub.is_file() and sub.suffix.lower() in SCRIPT_OR_ARCHIVE_EXTS:
-                        return True
-            except Exception:
-                continue
+        count = 0
+        with os.scandir(game) as entries:
+            for child in entries:
+                if not child.is_dir(follow_symlinks=False):
+                    continue
+                count += 1
+                if count > 160:
+                    break
+                try:
+                    sub_count = 0
+                    with os.scandir(child.path) as sub_entries:
+                        for sub in sub_entries:
+                            sub_count += 1
+                            if sub_count > 160:
+                                break
+                            if sub.is_file(follow_symlinks=False) and Path(sub.name).suffix.lower() in SCRIPT_OR_ARCHIVE_EXTS:
+                                return True
+                except Exception:
+                    continue
     except Exception:
         pass
     return False
@@ -98,12 +258,24 @@ def _has_renpy_payload(game):
 
 def is_renpy_game(candidate):
     game = _game_folder(candidate)
-    return bool(game and _has_renpy_payload(game))
+    if game and _has_renpy_payload(game):
+        return True
+    # Fallback signature for unusual distributions: Ren'Py runtime + game dir.
+    try:
+        root = Path(candidate)
+        game = root / "game"
+        renpy = root / "renpy"
+        if _is_dir(game) and _is_dir(renpy):
+            with os.scandir(root) as entries:
+                return any(e.is_file(follow_symlinks=False) and e.name.lower().endswith(".exe") for e in entries)
+    except Exception:
+        pass
+    return False
 
 
-def _scan_root(root, max_depth=2, max_dirs=2500):
+def _scan_root(root, max_depth=2, max_dirs=4000):
     root = Path(root)
-    if not root.is_dir():
+    if not _is_dir(root):
         return []
 
     results = []
@@ -114,7 +286,7 @@ def _scan_root(root, max_depth=2, max_dirs=2500):
         visited += 1
         try:
             game = _game_folder(current)
-            if game and _has_renpy_payload(game):
+            if game and ( _has_renpy_payload(game) or is_renpy_game(current) ):
                 results.append(game.parent)
                 continue
             if depth >= max_depth:
@@ -132,33 +304,35 @@ def _scan_root(root, max_depth=2, max_dirs=2500):
 
 
 def discovery_roots():
-    roots = [downloads_root(), Path("D:/Download"), Path("D:/Downloads")]
-    # Add home only shallowly as a Windows fallback, without walking whole drives.
-    roots.append(Path.home())
     out, seen = [], set()
-    for root in roots:
-        try:
-            key = str(root.resolve()).lower()
-        except Exception:
-            key = str(root).lower()
+    for root in shared_storage_candidates():
+        key = _norm_key(root)
         if key in seen:
             continue
         seen.add(key)
-        if root.is_dir():
+        if _is_dir(root):
             out.append(root)
     return out
+
+
+def _scan_depth(root):
+    name = root.name.lower()
+    if name in DOWNLOAD_NAMES:
+        return 4
+    try:
+        if root == Path(root.anchor) and str(root.drive).upper() != "C:":
+            return 3
+    except Exception:
+        pass
+    return 2
 
 
 def find_renpy_games():
     found = []
     seen = set()
     for root in discovery_roots():
-        depth = 3 if root == downloads_root() else 1
-        for game_root in _scan_root(root, max_depth=depth):
-            try:
-                key = str(game_root.resolve()).lower()
-            except Exception:
-                key = str(game_root).lower()
+        for game_root in _scan_root(root, max_depth=_scan_depth(root)):
+            key = _norm_key(game_root)
             if key in seen:
                 continue
             seen.add(key)
@@ -183,7 +357,7 @@ def choose_renpy_game(parent, title="Ren'Py 게임 선택"):
     ttk.Label(wrap, text="찾은 Ren'Py 게임", style="Title.TLabel").pack(anchor="w")
     ttk.Label(
         wrap,
-        text="Downloads 주변을 빠르게 확인해서 Ren'Py 게임만 보여줘요. 목록에 없으면 직접 찾을 수 있어요.",
+        text="Winlator 공유 저장소와 Downloads 주변을 확인해서 Ren'Py 게임만 보여줘요.",
         style="Subtitle.TLabel",
     ).pack(anchor="w", pady=(3, 12))
 
@@ -200,6 +374,7 @@ def choose_renpy_game(parent, title="Ren'Py 게임 선택"):
 
     def close_with(path):
         if path:
+            remember_game_path(path)
             selected["path"] = str(path)
         try:
             win.grab_release()
@@ -216,11 +391,18 @@ def choose_renpy_game(parent, title="Ren'Py 게임 선택"):
             close_with(values[1])
 
     def browse():
-        path = filedialog.askdirectory(title="Ren'Py 게임 폴더 직접 선택", parent=win)
+        initial = None
+        roots = discovery_roots()
+        if roots:
+            initial = str(roots[0])
+        kwargs = {"title": "Ren'Py 게임 폴더 직접 선택", "parent": win}
+        if initial:
+            kwargs["initialdir"] = initial
+        path = filedialog.askdirectory(**kwargs)
         if path:
             close_with(path)
 
-    def apply_results(games):
+    def apply_results(games, roots):
         if not win.winfo_exists():
             return
         for item in tree.get_children():
@@ -233,14 +415,19 @@ def choose_renpy_game(parent, title="Ren'Py 게임 선택"):
             tree.focus(first)
             status.set(f"Ren'Py 게임 {len(games)}개를 찾았어요.")
         else:
-            status.set("자동으로 찾은 게임이 없어요. '직접 찾아보기'를 사용할 수 있어요.")
+            shown = ", ".join(str(x) for x in roots[:3])
+            if shown:
+                status.set(f"게임을 못 찾았어요 · 확인 위치: {shown}")
+            else:
+                status.set("공유 저장소를 찾지 못했어요. '직접 찾아보기'로 한 번 선택하면 다음부터 기억해요.")
 
     def scan():
-        status.set("Ren'Py 게임을 찾고 있어요...")
+        status.set("Winlator 공유 저장소에서 Ren'Py 게임을 찾고 있어요...")
         def job():
+            roots = discovery_roots()
             games = find_renpy_games()
             try:
-                parent.after(0, lambda g=games: apply_results(g))
+                parent.after(0, lambda g=games, r=roots: apply_results(g, r))
             except Exception:
                 pass
         threading.Thread(target=job, daemon=True, name="renpy-smart-picker").start()
@@ -261,12 +448,18 @@ def run_v044_picker_self_test():
     try:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            demo = root / "DemoGame"
+            download = root / "Download"
+            demo = download / "DemoGame"
             game = demo / "game"
             game.mkdir(parents=True)
             (game / "archive.rpa").write_bytes(b"demo")
             assert is_renpy_game(demo)
             assert not is_renpy_game(root / "Missing")
+            assert _download_ancestor(demo) == download
+            workspace = hq_workspace_for(demo, "test")
+            # On the test runner the selected game's Download ancestor must win
+            # over C:\Users\...\Downloads exactly like it should in Winlator.
+            assert _norm_key(download) in _norm_key(workspace)
             name = safe_folder_name('A:B?C*')
             assert ":" not in name and "?" not in name and "*" not in name
         return 0
