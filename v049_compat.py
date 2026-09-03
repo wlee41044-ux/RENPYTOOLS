@@ -13,13 +13,7 @@ _CJK_FONT_HINTS = (
 
 
 def decode_rpy_text(raw, quote='"'):
-    """Turn a source-level Ren'Py quoted string into the runtime text key.
-
-    The old extractor kept escape sequences literally. That makes a generated
-    translate-strings `old` key fail to match dialogue containing \n, escaped
-    quotes, unicode escapes, etc. Ren'Py string syntax is close enough to Python
-    for ordinary quoted dialogue; use literal_eval and a conservative fallback.
-    """
+    """Turn a source-level Ren'Py quoted string into the runtime text key."""
     literal = quote + raw + quote
     try:
         value = ast.literal_eval(literal)
@@ -28,8 +22,6 @@ def decode_rpy_text(raw, quote='"'):
     except Exception:
         pass
 
-    # Conservative fallback: decode only escapes that are unambiguous in Ren'Py
-    # dialogue while leaving unknown backslash sequences untouched.
     def repl(match):
         token = match.group(0)
         table = {
@@ -57,18 +49,22 @@ def decode_rpy_text(raw, quote='"'):
     return re.sub(r"\\(?:\\|n|r|t|\"|'|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})", repl, raw)
 
 
-def extract_strings_compat(path):
-    """Compatibility extractor using runtime-equivalent string values."""
-    out, seen = [], set()
+def iter_extract_strings_stream_compat(path):
+    """Line-by-line compatibility extractor for large games."""
     path = Path(path)
-    for no, line in enumerate(path.read_text("utf-8", errors="replace").splitlines(), 1):
-        for match in core.STRING_RE.finditer(line):
-            raw = match.group("text")
-            value = decode_rpy_text(raw, match.group("quote"))
-            if core.looks_translatable(line, value) and value not in seen:
-                seen.add(value)
-                out.append((no, value))
-    return out
+    seen = set()
+    with path.open("r", encoding="utf-8", errors="replace") as fp:
+        for no, line in enumerate(fp, 1):
+            for match in core.STRING_RE.finditer(line):
+                raw = match.group("text")
+                value = decode_rpy_text(raw, match.group("quote"))
+                if core.looks_translatable(line, value) and value not in seen:
+                    seen.add(value)
+                    yield no, value
+
+
+def extract_strings_compat(path):
+    return list(iter_extract_strings_stream_compat(path))
 
 
 def find_cjk_font(game_dir, max_files=5000):
@@ -140,7 +136,6 @@ _ORIGINAL_APPLY = core.PatcherApp.apply_patch_to_game
 
 def apply_patch_compat(self, patch_root, game_dir, target_dir):
     destination, backup = _ORIGINAL_APPLY(self, patch_root, game_dir, target_dir)
-    # Replace the late v0.3.7 loader with the early/official-style v0.4.9 loader.
     write_language_compat(Path(game_dir), target_dir)
     return destination, backup
 
