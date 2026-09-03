@@ -41,21 +41,23 @@ jobs:
       - name: UI workflow self-test on Windows
         shell: powershell
         run: |
-          python RenPyToolsLauncherV047.py --self-test
+          python RenPyToolsLauncherV048.py --self-test
           if ($LASTEXITCODE -ne 0) {
+            if (Test-Path "RenPyTools-v048-selftest-error.txt") { Get-Content "RenPyTools-v048-selftest-error.txt" }
             if (Test-Path "RenPyToolsUI-selftest-error.txt") { Get-Content "RenPyToolsUI-selftest-error.txt" }
-            throw "RenPyToolsLauncherV047 source self-test failed"
+            throw "RenPyToolsLauncherV048 source self-test failed"
           }
 
       - name: Build RenPyAIPatcher
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --onefile --collect-all rpatool --name RenPyAIPatcher RenPyToolsLauncherV047.py
+          python -m PyInstaller --noconfirm --clean --windowed --onefile --collect-all rpatool --name RenPyAIPatcher RenPyToolsLauncherV048.py
 
       - name: Run built Patcher EXE self-test
         shell: powershell
         run: |
           $proc = Start-Process -FilePath ".\dist\RenPyAIPatcher.exe" -ArgumentList "--self-test" -Wait -PassThru
           if ($proc.ExitCode -ne 0) {
+            if (Test-Path "RenPyTools-v048-selftest-error.txt") { Get-Content "RenPyTools-v048-selftest-error.txt" }
             if (Test-Path "RenPyToolsUI-selftest-error.txt") { Get-Content "RenPyToolsUI-selftest-error.txt" }
             if (Test-Path "RenPyAIPatcher-selftest-error.txt") { Get-Content "RenPyAIPatcher-selftest-error.txt" }
             throw "Built RenPyAIPatcher.exe self-test failed with exit code $($proc.ExitCode)"
