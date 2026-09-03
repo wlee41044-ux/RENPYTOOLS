@@ -10,23 +10,22 @@ from RenPyToolsMain import RenPyToolsMain, run_all_self_tests as run_v043_tests
 from v044_smart_picker import choose_renpy_game, hq_workspace_for, run_v044_picker_self_test
 from v043_features import build_hq_chunks_streaming
 
-ui_module.UI_VERSION = "0.4.4"
+ui_module.UI_VERSION = "0.4.5"
 
 
-class RenPyToolsV044(RenPyToolsMain):
-    """v0.4.4 UX overlay: smart Ren'Py picker + Downloads HQ output."""
+class RenPyToolsV045(RenPyToolsMain):
+    """v0.4.5 UX overlay: robust Winlator smart picker + real Downloads HQ output."""
 
     def __init__(self):
         super().__init__()
-        ui_module.UI_VERSION = "0.4.4"
-        self.title("RenPy Tools 0.4.4")
+        ui_module.UI_VERSION = "0.4.5"
+        self.title("RenPy Tools 0.4.5")
         self.render()
 
     def _choose_game(self, title="Ren'Py 게임 선택"):
         return choose_renpy_game(self, title=title)
 
     def _select_game_folder(self, next_route=None):
-        """Update flow: show detected Ren'Py games first, manual browse only as fallback."""
         path = self._choose_game("업데이트할 Ren'Py 게임 선택")
         if not path:
             return False
@@ -46,7 +45,6 @@ class RenPyToolsV044(RenPyToolsMain):
         return True
 
     def start_quick_from_picker(self):
-        """Quick mode starts from the smart detected-game list."""
         if self._scan_busy:
             return
         path = self._choose_game("번역할 Ren'Py 게임 선택")
@@ -71,7 +69,6 @@ class RenPyToolsV044(RenPyToolsMain):
         threading.Thread(target=job, daemon=True, name="renpy-smart-quick-prepare").start()
 
     def prepare_hq_from_picker(self):
-        """HQ mode also uses the smart picker and writes chunks under Downloads."""
         if self._hq_busy:
             return
         path = self._choose_game("고품질 번역할 Ren'Py 게임 선택")
@@ -91,7 +88,7 @@ class RenPyToolsV044(RenPyToolsMain):
             try:
                 prepared = self._prepare_source(path, status=self._thread_hq_status)
                 workspace = hq_workspace_for(path, time.strftime("%Y%m%d_%H%M%S"))
-                self._thread_hq_status("Downloads에 고품질 번역 파일을 만들고 있어요...")
+                self._thread_hq_status("휴대폰 Downloads에 고품질 번역 파일을 만들고 있어요...")
                 manifest = build_hq_chunks_streaming(
                     prepared["source"],
                     workspace,
@@ -123,4 +120,4 @@ def run_all_self_tests():
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
         raise SystemExit(run_all_self_tests())
-    RenPyToolsV044().mainloop()
+    RenPyToolsV045().mainloop()
