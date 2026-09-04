@@ -14,6 +14,7 @@ from RenPyExtractor import (
 )
 
 SCRIPT_EXTS = {".rpy", ".rpyc", ".rpym", ".rpymc"}
+TEXT_EXTS = {".rpy", ".rpym"}
 COMPILED_EXTS = {".rpyc", ".rpymc"}
 ARCHIVE_EXTS = {".rpa", ".rpi"}
 SKIP_DIRS = {"tl", "cache", "saves", "_renpytools_backup", "renpytools_output"}
@@ -32,6 +33,7 @@ def _walk_files(root, suffixes):
 
 
 def can_auto_decompile(source):
+    """True when the game has compiled scripts or archives that may hide scripts."""
     try:
         game = resolve_game_folder(source)
     except Exception:
@@ -48,7 +50,12 @@ def decompile_cache_root(source):
 
 
 def prepare_decompiled_source(source, status=None):
-    """Create a translation-only decompiled copy without modifying the game."""
+    """Create a complete translation-only script copy without modifying the game.
+
+    Loose .rpy/.rpym files are authoritative. If a matching compiled file also
+    exists, the readable source is preserved instead of being overwritten by a
+    decompiled copy. Compiled/archive-only scripts are still recovered.
+    """
     if not HAVE_TOOLKIT:
         raise RuntimeError("자동 디컴파일에 필요한 rpa-toolkit을 불러오지 못했습니다.")
 
@@ -67,7 +74,7 @@ def prepare_decompiled_source(source, status=None):
             except Exception:
                 pass
 
-    report("게임 스크립트를 준비하고 있어요...")
+    report("기존 스크립트와 컴파일된 스크립트를 모으고 있어요...")
     loose = _walk_files(game_src, SCRIPT_EXTS)
     for path in loose:
         rel = path.relative_to(game_src)
@@ -79,7 +86,7 @@ def prepare_decompiled_source(source, status=None):
     extracted = 0
     archive_fail = 0
     for index, archive in enumerate(archives, 1):
-        report(f"압축된 스크립트를 찾는 중... {index}/{len(archives)}")
+        report(f"압축 파일에서 스크립트를 찾고 있어요... {index}/{len(archives)}")
         try:
             archive_parent = archive.parent.relative_to(game_src)
             with RenPyArchive(str(archive)) as rpa:
@@ -101,9 +108,21 @@ def prepare_decompiled_source(source, status=None):
     compiled = _walk_files(dest_game, COMPILED_EXTS)
     ok = 0
     failed = 0
+    preserved = 0
     for index, path in enumerate(compiled, 1):
-        report(f"파일을 다듬고 있어요... {index}/{len(compiled)}")
+        report(f"컴파일된 스크립트를 디컴파일하고 있어요... {index}/{len(compiled)}")
         target = path.with_suffix(".rpym" if path.suffix.lower() == ".rpymc" else ".rpy")
+
+        # A shipped source file is preferable to regenerating it from bytecode.
+        # This also avoids fake/unsupported RPYC files replacing valid readable text.
+        if target.is_file():
+            preserved += 1
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            continue
+
         try:
             result = decompile_rpyc_file(path, output_path=target, overwrite=True)
             if getattr(result, "success", True) and target.is_file():
@@ -114,14 +133,14 @@ def prepare_decompiled_source(source, status=None):
         except Exception:
             failed += 1
 
-    text_scripts = _walk_files(dest_game, {".rpy", ".rpym"})
+    text_scripts = _walk_files(dest_game, TEXT_EXTS)
     if not text_scripts:
         raise RuntimeError(
             "자동 디컴파일을 시도했지만 번역 가능한 .rpy/.rpym 파일을 만들지 못했습니다. "
             f"RPYC 성공 {ok}개 / 실패 {failed}개 / RPA 추출 {extracted}개"
         )
 
-    report("파일 준비가 끝났어요.")
+    report("디컴파일/스크립트 준비가 끝났어요.")
     return output, {
         "loose": len(loose),
         "archives": len(archives),
@@ -129,6 +148,7 @@ def prepare_decompiled_source(source, status=None):
         "archive_fail": archive_fail,
         "compiled": len(compiled),
         "decompiled": ok,
+        "preserved_text": preserved,
         "decompile_fail": failed,
         "scripts": len(text_scripts),
         "original_game": str(game_src),
