@@ -52,9 +52,11 @@ def decompile_cache_root(source):
 def prepare_decompiled_source(source, status=None):
     """Create a complete translation-only script copy without modifying the game.
 
-    Loose .rpy/.rpym files are authoritative. If a matching compiled file also
-    exists, the readable source is preserved instead of being overwritten by a
-    decompiled copy. Compiled/archive-only scripts are still recovered.
+    Every RPYC/RPYMC is now actually attempted. If a readable .rpy/.rpym is
+    already shipped beside it, a successful decompile refreshes that copy so we
+    do not accidentally translate an older source file. If decompilation fails,
+    the shipped readable source is kept as a fallback. A compiled-only script
+    that cannot be recovered stops translation instead of being silently skipped.
     """
     if not HAVE_TOOLKIT:
         raise RuntimeError("자동 디컴파일에 필요한 rpa-toolkit을 불러오지 못했습니다.")
@@ -109,29 +111,67 @@ def prepare_decompiled_source(source, status=None):
     ok = 0
     failed = 0
     preserved = 0
+    refreshed = 0
+    unrecovered = []
+
     for index, path in enumerate(compiled, 1):
         report(f"컴파일된 스크립트를 디컴파일하고 있어요... {index}/{len(compiled)}")
         target = path.with_suffix(".rpym" if path.suffix.lower() == ".rpymc" else ".rpy")
+        had_readable = target.is_file()
+        temp_target = target.with_name(target.stem + ".renpytools_decompiled" + target.suffix)
+        try:
+            temp_target.unlink(missing_ok=True)
+        except Exception:
+            pass
 
-        # A shipped source file is preferable to regenerating it from bytecode.
-        # This also avoids fake/unsupported RPYC files replacing valid readable text.
-        if target.is_file():
-            preserved += 1
+        success = False
+        try:
+            result = decompile_rpyc_file(path, output_path=temp_target, overwrite=True)
+            success = bool(getattr(result, "success", True) and temp_target.is_file())
+        except Exception:
+            success = False
+
+        if success:
+            try:
+                os.replace(temp_target, target)
+            except Exception:
+                shutil.copy2(temp_target, target)
+                temp_target.unlink(missing_ok=True)
+            ok += 1
+            if had_readable:
+                refreshed += 1
             try:
                 path.unlink(missing_ok=True)
             except Exception:
                 pass
             continue
 
+        failed += 1
         try:
-            result = decompile_rpyc_file(path, output_path=target, overwrite=True)
-            if getattr(result, "success", True) and target.is_file():
-                ok += 1
-                path.unlink(missing_ok=True)
-            else:
-                failed += 1
+            temp_target.unlink(missing_ok=True)
         except Exception:
-            failed += 1
+            pass
+        if had_readable:
+            preserved += 1
+            # The translation cache only needs readable scripts. Keeping the
+            # failed RPYC around can make later scans think preparation is incomplete.
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        else:
+            try:
+                unrecovered.append(str(path.relative_to(dest_game)))
+            except Exception:
+                unrecovered.append(path.name)
+
+    if unrecovered:
+        sample = ", ".join(unrecovered[:5])
+        raise RuntimeError(
+            "일부 컴파일 스크립트를 디컴파일하지 못해서 번역을 중단했습니다. "
+            f"복구 실패 {len(unrecovered)}개 · 예: {sample}. "
+            "이 상태에서 계속하면 대사가 빠진 불완전 패치가 만들어질 수 있습니다."
+        )
 
     text_scripts = _walk_files(dest_game, TEXT_EXTS)
     if not text_scripts:
@@ -148,8 +188,10 @@ def prepare_decompiled_source(source, status=None):
         "archive_fail": archive_fail,
         "compiled": len(compiled),
         "decompiled": ok,
+        "refreshed_text": refreshed,
         "preserved_text": preserved,
         "decompile_fail": failed,
+        "unrecovered": 0,
         "scripts": len(text_scripts),
         "original_game": str(game_src),
     }
