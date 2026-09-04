@@ -25,6 +25,15 @@ jobs:
           python -m pip install pyinstaller
           python -m pip install "git+https://github.com/regiellis/rpa-toolkit.git"
 
+      - name: Download bundled Korean font and license
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path "bundled_fonts" | Out-Null
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/google/fonts/main/ofl/notosanskr/NotoSansKR%5Bwght%5D.ttf" -OutFile "bundled_fonts/NotoSansKR.ttf"
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/google/fonts/main/ofl/notosanskr/OFL.txt" -OutFile "bundled_fonts/NotoSansKR-OFL.txt"
+          if ((Get-Item "bundled_fonts/NotoSansKR.ttf").Length -lt 1000000) { throw "NotoSansKR.ttf download looks invalid" }
+          if (!(Test-Path "bundled_fonts/NotoSansKR-OFL.txt")) { throw "Noto Sans KR OFL license missing" }
+
       - name: Build RenPyExtractor
         run: |
           python -m PyInstaller --noconfirm --clean --windowed --onefile --collect-all rpatool --name RenPyExtractor RenPyExtractor.py
@@ -41,25 +50,27 @@ jobs:
       - name: UI workflow self-test on Windows
         shell: powershell
         run: |
-          python RenPyToolsLauncherV051Stable.py --self-test
+          python RenPyToolsLauncherV052Stable.py --self-test
           if ($LASTEXITCODE -ne 0) {
+            if (Test-Path "RenPyTools-v052-selftest-error.txt") { Get-Content "RenPyTools-v052-selftest-error.txt" }
             if (Test-Path "RenPyTools-v051-prepare-error.txt") { Get-Content "RenPyTools-v051-prepare-error.txt" }
             if (Test-Path "RenPyTools-v050-contract-error.txt") { Get-Content "RenPyTools-v050-contract-error.txt" }
             if (Test-Path "RenPyTools-v050-selftest-error.txt") { Get-Content "RenPyTools-v050-selftest-error.txt" }
             if (Test-Path "RenPyTools-v049-selftest-error.txt") { Get-Content "RenPyTools-v049-selftest-error.txt" }
             if (Test-Path "RenPyToolsUI-selftest-error.txt") { Get-Content "RenPyToolsUI-selftest-error.txt" }
-            throw "RenPyTools v0.5.1 source self-test failed"
+            throw "RenPyTools v0.5.2 source self-test failed"
           }
 
       - name: Build RenPyAIPatcher
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --onefile --collect-all rpatool --name RenPyAIPatcher RenPyToolsLauncherV051Stable.py
+          python -m PyInstaller --noconfirm --clean --windowed --onefile --collect-all rpatool --add-data "bundled_fonts;bundled_fonts" --name RenPyAIPatcher RenPyToolsLauncherV052Stable.py
 
       - name: Run built Patcher EXE self-test
         shell: powershell
         run: |
           $proc = Start-Process -FilePath ".\dist\RenPyAIPatcher.exe" -ArgumentList "--self-test" -Wait -PassThru
           if ($proc.ExitCode -ne 0) {
+            if (Test-Path "RenPyTools-v052-selftest-error.txt") { Get-Content "RenPyTools-v052-selftest-error.txt" }
             if (Test-Path "RenPyTools-v051-prepare-error.txt") { Get-Content "RenPyTools-v051-prepare-error.txt" }
             if (Test-Path "RenPyTools-v050-contract-error.txt") { Get-Content "RenPyTools-v050-contract-error.txt" }
             if (Test-Path "RenPyTools-v050-selftest-error.txt") { Get-Content "RenPyTools-v050-selftest-error.txt" }
