@@ -2,11 +2,13 @@
 import sys
 
 from RenPyToolsLauncherV054Stable import run_all_self_tests as run_v054_tests
-from RenPyToolsLauncherV055 import RenPyToolsV055
 from v055_release_payload import run_v055_self_test
 
 
 def run_all_self_tests():
+    # Run the inherited regression suite before importing the v0.5.5 launcher.
+    # Importing RenPyToolsLauncherV055 installs the strict decompile monkeypatch,
+    # which intentionally changes behavior expected by older fallback tests.
     code = run_v054_tests()
     if code:
         return code
@@ -16,4 +18,8 @@ def run_all_self_tests():
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
         raise SystemExit(run_all_self_tests())
+
+    # Normal app startup may install the v0.5.5 strict preparation rules only
+    # after the legacy self-test path has been bypassed.
+    from RenPyToolsLauncherV055 import RenPyToolsV055
     RenPyToolsV055().mainloop()
