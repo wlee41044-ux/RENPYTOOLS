@@ -50,11 +50,30 @@ def check_version_sync():
     print(f"Version sync OK: {CURRENT_VERSION}")
 
 
+def check_frozen_safe_tests():
+    """Reject source-introspection patterns that work from .py but fail in PyInstaller one-file EXEs."""
+    bad = []
+    for path in ROOT.glob("*.py"):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        if "inspect.getsource(" in text:
+            bad.append(path.name)
+    if bad:
+        fail(
+            "frozen-unsafe inspect.getsource() found: " + ", ".join(sorted(bad))
+            + ". Use behavior-based self-tests instead."
+        )
+    print("Frozen-EXE self-test safety OK")
+
+
 def main():
     # Syntax errors are caught before any test module can mutate global state.
     if not compileall.compile_dir(str(ROOT), quiet=1, maxlevels=1):
         fail("Python syntax/compile check failed")
     check_version_sync()
+    check_frozen_safe_tests()
 
     # Each major suite gets a fresh interpreter. This is deliberate: many legacy
     # compatibility layers monkeypatch launchers at import time, so sharing one
