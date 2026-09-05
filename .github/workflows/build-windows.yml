@@ -1,18 +1,29 @@
 name: Build Windows Installer
 
 on:
+  workflow_run:
+    workflows: ["RenPy Tools Preflight"]
+    types: [completed]
   workflow_dispatch:
-  push:
-    branches:
-      - main
+
+concurrency:
+  group: renpytools-installer-main
+  cancel-in-progress: true
 
 jobs:
   build:
+    # Normal push builds only start after the separate preflight workflow passed.
+    # workflow_dispatch remains available as an explicit manual override.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: windows-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout validated commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -24,6 +35,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pyinstaller
           python -m pip install "git+https://github.com/regiellis/rpa-toolkit.git"
+
+      - name: Manual-dispatch preflight
+        if: github.event_name == 'workflow_dispatch'
+        shell: powershell
+        run: |
+          python ci_preflight.py
+          if ($LASTEXITCODE -ne 0) { throw "Manual installer preflight failed" }
 
       - name: Download bundled Korean font and license
         shell: powershell
@@ -38,55 +56,19 @@ jobs:
         run: |
           python -m PyInstaller --noconfirm --clean --windowed --onefile --collect-all rpatool --name RenPyExtractor RenPyExtractor.py
 
-      - name: Core source self-test on Windows
-        shell: powershell
-        run: |
-          python RenPyAIPatcher.py --self-test
-          if ($LASTEXITCODE -ne 0) {
-            if (Test-Path "RenPyAIPatcher-selftest-error.txt") { Get-Content "RenPyAIPatcher-selftest-error.txt" }
-            throw "RenPyAIPatcher core source self-test failed"
-          }
-
-      - name: UI workflow self-test on Windows
-        shell: powershell
-        run: |
-          python RenPyToolsLauncherV058Stable.py --self-test
-          if ($LASTEXITCODE -ne 0) {
-            if (Test-Path "RenPyTools-v058-selftest-error.txt") { Get-Content "RenPyTools-v058-selftest-error.txt" }
-            if (Test-Path "RenPyTools-v057-selftest-error.txt") { Get-Content "RenPyTools-v057-selftest-error.txt" }
-            if (Test-Path "RenPyTools-v056-selftest-error.txt") { Get-Content "RenPyTools-v056-selftest-error.txt" }
-            if (Test-Path "RenPyTools-v055-selftest-error.txt") { Get-Content "RenPyTools-v055-selftest-error.txt" }
-            if (Test-Path "RenPyTools-v054-selftest-error.txt") { Get-Content "RenPyTools-v054-selftest-error.txt" }
-            if (Test-Path "RenPyTools-v053-selftest-error.txt") { Get-Content "RenPyTools-v053-selftest-error.txt" }
-            if (Test-Path "RenPyTools-v052-selftest-error.txt") { Get-Content "RenPyTools-v052-selftest-error.txt" }
-            if (Test-Path "RenPyTools-v051-prepare-error.txt") { Get-Content "RenPyTools-v051-prepare-error.txt" }
-            if (Test-Path "RenPyTools-v050-contract-error.txt") { Get-Content "RenPyTools-v050-contract-error.txt" }
-            if (Test-Path "RenPyTools-v050-selftest-error.txt") { Get-Content "RenPyTools-v050-selftest-error.txt" }
-            if (Test-Path "RenPyTools-v049-selftest-error.txt") { Get-Content "RenPyTools-v049-selftest-error.txt" }
-            if (Test-Path "RenPyToolsUI-selftest-error.txt") { Get-Content "RenPyToolsUI-selftest-error.txt" }
-            throw "RenPyTools v0.5.8 source self-test failed"
-          }
-
       - name: Build RenPyAIPatcher
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --onefile --collect-all rpatool --add-data "bundled_fonts;bundled_fonts" --name RenPyAIPatcher RenPyToolsLauncherV058Stable.py
+          python -m PyInstaller --noconfirm --clean --windowed --onefile --collect-all rpatool --add-data "bundled_fonts;bundled_fonts" --name RenPyAIPatcher RenPyToolsCurrent.py
 
       - name: Run built Patcher EXE self-test
         shell: powershell
         run: |
           $proc = Start-Process -FilePath ".\dist\RenPyAIPatcher.exe" -ArgumentList "--self-test" -Wait -PassThru
           if ($proc.ExitCode -ne 0) {
-            if (Test-Path "RenPyTools-v058-selftest-error.txt") { Get-Content "RenPyTools-v058-selftest-error.txt" }
-            if (Test-Path "RenPyTools-v057-selftest-error.txt") { Get-Content "RenPyTools-v057-selftest-error.txt" }
-            if (Test-Path "RenPyTools-v056-selftest-error.txt") { Get-Content "RenPyTools-v056-selftest-error.txt" }
-            if (Test-Path "RenPyTools-v055-selftest-error.txt") { Get-Content "RenPyTools-v055-selftest-error.txt" }
-            if (Test-Path "RenPyTools-v054-selftest-error.txt") { Get-Content "RenPyTools-v054-selftest-error.txt" }
-            if (Test-Path "RenPyTools-v053-selftest-error.txt") { Get-Content "RenPyTools-v053-selftest-error.txt" }
-            if (Test-Path "RenPyTools-v052-selftest-error.txt") { Get-Content "RenPyTools-v052-selftest-error.txt" }
-            if (Test-Path "RenPyTools-v051-prepare-error.txt") { Get-Content "RenPyTools-v051-prepare-error.txt" }
-            if (Test-Path "RenPyTools-v050-contract-error.txt") { Get-Content "RenPyTools-v050-contract-error.txt" }
-            if (Test-Path "RenPyTools-v049-selftest-error.txt") { Get-Content "RenPyTools-v049-selftest-error.txt" }
-            if (Test-Path "RenPyToolsUI-selftest-error.txt") { Get-Content "RenPyToolsUI-selftest-error.txt" }
+            Get-ChildItem -Path . -Filter "RenPyTools*-error.txt" -ErrorAction SilentlyContinue | ForEach-Object {
+              Write-Host "--- $($_.Name) ---"
+              Get-Content $_.FullName
+            }
             if (Test-Path "RenPyAIPatcher-selftest-error.txt") { Get-Content "RenPyAIPatcher-selftest-error.txt" }
             throw "Built RenPyAIPatcher.exe self-test failed with exit code $($proc.ExitCode)"
           }
@@ -110,12 +92,8 @@ jobs:
       - name: Verify Setup EXE
         shell: powershell
         run: |
-          if (!(Test-Path "installer\RenPyTools_Setup.exe")) {
-            throw "RenPyTools_Setup.exe was not created"
-          }
-          if (!(Test-Path "dist\RenPyPatchInstallerStub.exe")) {
-            throw "RenPyPatchInstallerStub.exe was not created"
-          }
+          if (!(Test-Path "installer\RenPyTools_Setup.exe")) { throw "RenPyTools_Setup.exe was not created" }
+          if (!(Test-Path "dist\RenPyPatchInstallerStub.exe")) { throw "RenPyPatchInstallerStub.exe was not created" }
 
       - name: Upload Setup EXE
         uses: actions/upload-artifact@v4
