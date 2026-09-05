@@ -50,8 +50,9 @@ jobs:
       - name: UI workflow self-test on Windows
         shell: powershell
         run: |
-          python RenPyToolsLauncherV057Stable.py --self-test
+          python RenPyToolsLauncherV058Stable.py --self-test
           if ($LASTEXITCODE -ne 0) {
+            if (Test-Path "RenPyTools-v058-selftest-error.txt") { Get-Content "RenPyTools-v058-selftest-error.txt" }
             if (Test-Path "RenPyTools-v057-selftest-error.txt") { Get-Content "RenPyTools-v057-selftest-error.txt" }
             if (Test-Path "RenPyTools-v056-selftest-error.txt") { Get-Content "RenPyTools-v056-selftest-error.txt" }
             if (Test-Path "RenPyTools-v055-selftest-error.txt") { Get-Content "RenPyTools-v055-selftest-error.txt" }
@@ -63,18 +64,19 @@ jobs:
             if (Test-Path "RenPyTools-v050-selftest-error.txt") { Get-Content "RenPyTools-v050-selftest-error.txt" }
             if (Test-Path "RenPyTools-v049-selftest-error.txt") { Get-Content "RenPyTools-v049-selftest-error.txt" }
             if (Test-Path "RenPyToolsUI-selftest-error.txt") { Get-Content "RenPyToolsUI-selftest-error.txt" }
-            throw "RenPyTools v0.5.7 source self-test failed"
+            throw "RenPyTools v0.5.8 source self-test failed"
           }
 
       - name: Build RenPyAIPatcher
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --onefile --collect-all rpatool --add-data "bundled_fonts;bundled_fonts" --name RenPyAIPatcher RenPyToolsLauncherV057Stable.py
+          python -m PyInstaller --noconfirm --clean --windowed --onefile --collect-all rpatool --add-data "bundled_fonts;bundled_fonts" --name RenPyAIPatcher RenPyToolsLauncherV058Stable.py
 
       - name: Run built Patcher EXE self-test
         shell: powershell
         run: |
           $proc = Start-Process -FilePath ".\dist\RenPyAIPatcher.exe" -ArgumentList "--self-test" -Wait -PassThru
           if ($proc.ExitCode -ne 0) {
+            if (Test-Path "RenPyTools-v058-selftest-error.txt") { Get-Content "RenPyTools-v058-selftest-error.txt" }
             if (Test-Path "RenPyTools-v057-selftest-error.txt") { Get-Content "RenPyTools-v057-selftest-error.txt" }
             if (Test-Path "RenPyTools-v056-selftest-error.txt") { Get-Content "RenPyTools-v056-selftest-error.txt" }
             if (Test-Path "RenPyTools-v055-selftest-error.txt") { Get-Content "RenPyTools-v055-selftest-error.txt" }
