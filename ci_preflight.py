@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Fast CI gate that must pass before the Windows installer workflow starts."""
+import ast
 import compileall
 import re
 import subprocess
@@ -51,18 +52,52 @@ def check_version_sync():
 
 
 def check_frozen_safe_tests():
-    """Reject source-introspection patterns that work from .py but fail in PyInstaller one-file EXEs."""
+    """Reject real inspect.getsource calls in app/test modules without false positives from comments/strings."""
     bad = []
     for path in ROOT.glob("*.py"):
+        # ci_preflight.py is a CI-only script and is never frozen into RenPyAIPatcher.exe.
+        if path.resolve() == Path(__file__).resolve():
+            continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(text, filename=str(path))
         except Exception:
             continue
-        if "inspect.getsource(" in text:
+
+        imported_getsource_names = set()
+        inspect_aliases = {"inspect"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "inspect":
+                        inspect_aliases.add(alias.asname or alias.name)
+            elif isinstance(node, ast.ImportFrom) and node.module == "inspect":
+                for alias in node.names:
+                    if alias.name == "getsource":
+                        imported_getsource_names.add(alias.asname or alias.name)
+
+        unsafe = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr == "getsource"
+                and isinstance(func.value, ast.Name)
+                and func.value.id in inspect_aliases
+            ):
+                unsafe = True
+                break
+            if isinstance(func, ast.Name) and func.id in imported_getsource_names:
+                unsafe = True
+                break
+        if unsafe:
             bad.append(path.name)
+
     if bad:
         fail(
-            "frozen-unsafe inspect.getsource() found: " + ", ".join(sorted(bad))
+            "frozen-unsafe source introspection found: " + ", ".join(sorted(bad))
             + ". Use behavior-based self-tests instead."
         )
     print("Frozen-EXE self-test safety OK")
