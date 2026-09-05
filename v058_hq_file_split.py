@@ -14,7 +14,7 @@ _HEADER_RESERVE_BYTES = 4096
 def _safe_master_file_bytes(profile):
     """RenPy Tools' own conservative attachment target, not a provider hard limit.
 
-    The selected service/plan/model still controls the token budget.  This adds a
+    The selected service/plan/model still controls the token budget. This adds a
     second, byte-size gate so a context-capable model does not receive one huge TXT
     that is awkward or rejected by a mobile AI app/file picker.
     """
@@ -53,8 +53,6 @@ def _safe_master_file_bytes(profile):
     else:
         target = 32 * 1024
 
-    # Small-context profiles should never get a large attachment merely because
-    # the provider's upload UI technically accepts it.
     if context and context <= 32000:
         target = min(target, 24 * 1024)
     elif context and context <= 128000:
@@ -268,19 +266,23 @@ def run_v058_self_test():
             game = root / "game"
             game.mkdir(parents=True)
             lines = ["label start:"]
-            for i in range(360):
-                lines.append(f'    "This is translation test sentence number {i:04d} with enough text to make the master file larger."')
+            # Make the fixture comfortably larger than two 48 KiB attachment
+            # targets. The previous 360-row fixture was only about one target,
+            # so its "must split" assertion was testing the fixture, not the code.
+            for i in range(1200):
+                lines.append(f'    "This is translation test sentence number {i:04d} with enough text to make the master file larger and verify byte-size splitting reliably."')
             (game / "script.rpy").write_text("\n".join(lines) + "\n", encoding="utf-8")
             out = Path(td) / "out"
             manifest = build_master_workflow_v058(
                 root, out, "ChatGPT", "Plus", "High (GPT-5.6 Sol)"
             )
-            assert len(manifest["parts"]) >= 2
+            assert len(manifest["parts"]) >= 2, manifest["parts"]
             for part in manifest["parts"]:
                 path = out / part["file"]
-                assert path.is_file()
-                # Header reserve keeps normal multi-row parts under the target.
-                assert path.stat().st_size <= chatgpt["safe_master_file_bytes"]
+                assert path.is_file(), path
+                assert path.stat().st_size <= chatgpt["safe_master_file_bytes"], (
+                    path.name, path.stat().st_size, chatgpt["safe_master_file_bytes"]
+                )
         return 0
     except Exception as exc:
         try:
