@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 import sys
 
-CURRENT_VERSION = "0.5.11"
+CURRENT_VERSION = "0.5.12"
 
 
 def run_all_self_tests():
     # Import the current stable test chain only when tests are explicitly run.
     # This prevents launcher monkeypatch side effects during CI discovery/imports.
-    from RenPyToolsLauncherV0511Stable import run_all_self_tests as run_current_tests
+    from RenPyToolsLauncherV0512Stable import run_all_self_tests as run_current_tests
     return run_current_tests()
 
 
 def launch_app():
-    from RenPyToolsLauncherV0511 import RenPyToolsV0511
-    RenPyToolsV0511().mainloop()
+    from RenPyToolsLauncherV0512 import RenPyToolsV0512
+    RenPyToolsV0512().mainloop()
 
 
 if __name__ == "__main__":
