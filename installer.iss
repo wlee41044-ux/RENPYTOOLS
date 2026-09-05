@@ -1,5 +1,5 @@
 #define MyAppName "RenPy Tools"
-#define MyAppVersion "0.5.12"
+#define MyAppVersion "0.5.13"
 #define MyAppPublisher "RenPy Tools"
 
 [Setup]
